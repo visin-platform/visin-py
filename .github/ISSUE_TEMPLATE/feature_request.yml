@@ -1,0 +1,14 @@
+name: Feature request
+description: Something visin could do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The problem, before any solution.
+    validations: { required: true }
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help

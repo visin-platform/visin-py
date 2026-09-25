@@ -1,0 +1,168 @@
+# One run for a whole release, started by hand from the Actions tab:
+#
+#   1. run CI
+#   2. pick the version, write it and the changelog entry, commit, tag
+#   3. build, publish to PyPI, create the GitHub release, publish the docs
+#
+# Run deliberately, as the monorepo's release is, so a version says something
+# about the software rather than counting merges. The stages are chained here
+# instead of triggered by the tag, because a tag pushed from a workflow starts
+# no other workflow.
+#
+# target=testpypi rehearses it: the same build goes to TestPyPI, and nothing is
+# committed, tagged or released.
+
+name: Release
+
+run-name: Release ${{ inputs.release-as || '(version from commits)' }} to ${{ inputs.target }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-as:
+        description: "Version (e.g. 0.3.0) or patch|minor|major. Empty derives it from the commits."
+        required: false
+        type: string
+      target:
+        description: "Where to publish"
+        required: true
+        default: pypi
+        type: choice
+        options: [pypi, testpypi]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.cut.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Pick the version and write the changelog
+        id: cut
+        env:
+          RELEASE_AS: ${{ inputs.release-as }}
+        run: |
+          VERSION=$(python scripts/release.py $RELEASE_AS)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          python scripts/release.py --notes "$VERSION" > "$RUNNER_TEMP/notes.md"
+          echo "## visin $VERSION" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build
+          twine check --strict dist/*
+
+      - name: Commit, tag and push
+        if: inputs.target == 'pypi'
+        env:
+          BRANCH: ${{ github.ref_name }}
+          VERSION: ${{ steps.cut.outputs.version }}
+        run: |
+          git config user.name "Visinbot"
+          git config user.email "bot@visin.eu"
+          git commit -am "chore(release): $VERSION"
+          git tag -a "v$VERSION" -m "chore(release): $VERSION"
+          # Something may have landed on the branch meanwhile: replay the
+          # release commit on top and move the tag with it.
+          if ! git push origin "HEAD:$BRANCH"; then
+            git pull --rebase origin "$BRANCH"
+            git tag -fa "v$VERSION" -m "chore(release): $VERSION"
+            git push origin "HEAD:$BRANCH"
+          fi
+          git push origin "v$VERSION"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release
+          path: |
+            dist/
+            ${{ runner.temp }}/notes.md
+
+  pypi:
+    needs: version
+    if: inputs.target == 'pypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/visin/${{ needs.version.outputs.version }}/
+    permissions:
+      id-token: write # trusted publishing: PyPI trusts this workflow, no token is stored
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release
+          path: release
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: release/dist/
+
+  testpypi:
+    needs: version
+    if: inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/visin/${{ needs.version.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release
+          path: release
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: release/dist/
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  github-release:
+    needs: [version, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release
+          path: release
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          NOTES=$(find release -name notes.md | head -1)
+          gh release create "v$VERSION" release/dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "visin $VERSION" --notes-file "$NOTES" --verify-tag
+
+  docs:
+    needs: [version, pypi]
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/docs.yml
+    with:
+      ref: v${{ needs.version.outputs.version }}

@@ -1,0 +1,27 @@
+name: Bug report
+description: Something visin does wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations: { required: true }
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: The smallest script that shows it, if you can.
+      render: python
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output
+      description: Run with `logging.getLogger("visin").setLevel(logging.DEBUG)`. Remove tokens first.
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`visin version`, Python version, OS, and the framework (Keras, Lightning) if one is involved"
+    validations: { required: true }

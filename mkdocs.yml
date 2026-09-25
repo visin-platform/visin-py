@@ -1,0 +1,81 @@
+site_name: visin
+site_description: Report training runs to Visin, and read them back.
+site_url: https://visin-platform.github.io/visin-py/
+repo_url: https://github.com/visin-platform/visin-py
+repo_name: visin-platform/visin-py
+edit_uri: edit/main/docs/
+copyright: MIT licensed
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: { icon: material/weather-night, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: { icon: material/weather-sunny, name: Light mode }
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Guides:
+      - What a run records: guides/reporting.md
+      - Configuration: guides/configuration.md
+      - Offline and unreliable networks: guides/offline.md
+      - Keras and Lightning: guides/frameworks.md
+      - Reading runs back: guides/reading.md
+      - The visin command: guides/cli.md
+  - API reference:
+      - visin: reference/index.md
+      - Run and init: reference/run.md
+      - Api: reference/api.md
+      - Offline and sync: reference/offline.md
+      - System information: reference/system.md
+      - Integrations: reference/integrations.md
+      - Errors: reference/errors.md
+  - Project:
+      - How it is built: architecture.md
+      - Contributing: contributing.md
+      - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      check_paths: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: sphinx
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            filters: ["!^_"]
+            merge_init_into_class: true
+
+watch:
+  - src/visin
+  - README.md
+  - CHANGELOG.md
+  - CONTRIBUTING.md
