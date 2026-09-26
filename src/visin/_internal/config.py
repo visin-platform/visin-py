@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,9 @@ ENV_PROJECT = ("VISIN_PROJECT", "VISIN_PROJECT_ID")
 ENV_VERIFY = "VISIN_VERIFY_SSL"
 ENV_MODE = "VISIN_MODE"
 ENV_DIR = "VISIN_DIR"
+# Datasets are served by their own service, at their own address; like VISIN_URL it has no default.
+ENV_DATASET_URL = ("VISIN_DATASET_URL",)
+ENV_DATA_DIR = "VISIN_DATA_DIR"
 
 MODES = ("online", "offline", "disabled")
 
@@ -57,6 +60,20 @@ def default_directory() -> Path:
         return Path(tempfile.gettempdir()) / "visin"
 
 
+def default_data_directory() -> Path:
+    """Where downloaded datasets go: ``$XDG_CACHE_HOME/visin/datasets``, else ``~/.cache/visin/datasets``.
+
+    A cache, not the report directory: a dataset can be downloaded again, and a
+    cluster's home quota rarely fits one. Point ``VISIN_DATA_DIR`` at scratch space.
+    """
+    cache = os.getenv("XDG_CACHE_HOME")
+    try:
+        base = Path(cache) if cache else Path.home() / ".cache"
+    except RuntimeError:  # no HOME, as in some minimal containers
+        base = Path(tempfile.gettempdir())
+    return base / "visin" / "datasets"
+
+
 @dataclass(frozen=True)
 class Settings:
     url: str | None
@@ -66,6 +83,8 @@ class Settings:
     verify_ssl: bool
     mode: str
     directory: Path
+    dataset_url: str | None = None
+    data_directory: Path = field(default_factory=default_data_directory)
 
     @property
     def configured(self) -> bool:
@@ -87,6 +106,7 @@ class Settings:
 def read_settings(**overrides: Any) -> Settings:
     """Read the environment. Keyword arguments that are not ``None`` win over it."""
     directory = os.getenv(ENV_DIR)
+    data_directory = os.getenv(ENV_DATA_DIR)
     settings = Settings(
         url=_first(ENV_URL),
         token=_first(ENV_TOKEN),
@@ -99,10 +119,13 @@ def read_settings(**overrides: Any) -> Settings:
         verify_ssl=_flag(ENV_VERIFY, True),
         mode=(os.getenv(ENV_MODE) or "online").strip().lower(),
         directory=Path(directory).expanduser() if directory else default_directory(),
+        dataset_url=_first(ENV_DATASET_URL),
+        data_directory=Path(data_directory).expanduser() if data_directory else default_data_directory(),
     )
     given = {key: value for key, value in overrides.items() if value is not None}
-    if "directory" in given:
-        given["directory"] = Path(given["directory"]).expanduser()
+    for key in ("directory", "data_directory"):
+        if key in given:
+            given[key] = Path(given[key]).expanduser()
     if "mode" in given:
         given["mode"] = str(given["mode"]).strip().lower()
     if given:

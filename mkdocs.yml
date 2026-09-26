@@ -31,11 +31,13 @@ nav:
       - Offline and unreliable networks: guides/offline.md
       - Keras and Lightning: guides/frameworks.md
       - Reading runs back: guides/reading.md
+      - Datasets: guides/datasets.md
       - The visin command: guides/cli.md
   - API reference:
       - visin: reference/index.md
       - Run and init: reference/run.md
       - Api: reference/api.md
+      - Datasets: reference/datasets.md
       - Offline and sync: reference/offline.md
       - System information: reference/system.md
       - Integrations: reference/integrations.md

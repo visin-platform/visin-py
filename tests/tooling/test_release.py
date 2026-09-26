@@ -1,6 +1,7 @@
 """scripts/release.py: the version it picks and the changelog it writes."""
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -108,6 +109,12 @@ def test_notes_for_a_missing_version_are_an_error():
 
 
 def test_the_real_changelog_can_be_released():
+    """The next release, made from the changelog as it stands: what is under Unreleased becomes its
+    entry, and the versions already released are left as they were."""
     text = (SCRIPT.parents[1] / "CHANGELOG.md").read_text()
-    released = release.update_changelog(text, "0.1.0", None, {}, "2026-09-25")
-    assert "visin.init()" in release.release_notes(released, "0.1.0")
+    current = release.read_version()
+    upcoming = release.next_version(current, [], "minor")
+    unreleased = re.search(r"^## \[Unreleased\]\n(.*?)(?=^## \[)", text, re.M | re.S).group(1).strip()
+    released = release.update_changelog(text, upcoming, current, {}, "2026-09-25")
+    assert release.release_notes(released, upcoming).strip() == (unreleased or "No user-facing changes.")
+    assert release.release_notes(released, current) == release.release_notes(text, current)

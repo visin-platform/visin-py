@@ -10,6 +10,13 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+### Added
+
+- `visin.Datasets` and the `visin datasets` / `visin download` commands: list the datasets on Visin's
+  dataset service (`VISIN_DATASET_URL`) and download one. A download resumes where an interrupted one
+  stopped, is checked against the size Visin reports, is unpacked safely into `VISIN_DATA_DIR`
+  (default `~/.cache/visin/datasets`), and is not repeated once complete.
+
 ## [0.1.0] - 2026-09-26
 
 ### Added

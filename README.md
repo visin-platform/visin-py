@@ -70,6 +70,18 @@ for run in api.trainings(project="road-seg", status="completed"):
     frame = api.epochs_frame(run)  # pip install 'visin[pandas]'
 ```
 
+## Datasets
+
+Datasets on Visin can be listed and downloaded, once, into `VISIN_DATA_DIR`:
+
+```bash
+export VISIN_DATASET_URL=https://dataset-api.example.com
+visin datasets
+visin download zod     # resumes if interrupted; prints the folder
+```
+
+`visin.Datasets` does the same from Python.
+
 ## Documentation
 
 **[visin-platform.github.io/visin-py](https://visin-platform.github.io/visin-py/)** has the

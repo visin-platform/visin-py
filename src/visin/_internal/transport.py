@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json as jsonlib
 import logging
+import os
 import platform
 import random
 import time
@@ -34,6 +35,9 @@ Timeout = Union[float, Tuple[float, float]]
 DEFAULT_TIMEOUT: Timeout = (5.0, 30.0)
 # Uploads move bytes, and the read deadline covers sending the body too.
 UPLOAD_TIMEOUT: Timeout = (5.0, 300.0)
+# A download's read deadline applies to each chunk, not the whole body.
+DOWNLOAD_TIMEOUT: Timeout = (5.0, 60.0)
+DOWNLOAD_CHUNK = 8 * 2**20
 
 # What Visin documents as worth retrying: the rate limit, and a gateway or
 # service that did not answer in time. A 500 is not on the list; repeating it
@@ -140,9 +144,10 @@ class HttpClient:
         self.session.headers["User-Agent"] = agent
         self.session.headers["Accept"] = "application/json"
 
-        # Signed uploads go straight to file-service with the signature as the
-        # credential. A session of their own means the Authorization header
-        # above can never ride along to a storage endpoint that has no use for it.
+        # Signed uploads and downloads go straight to file-service with the
+        # signature as the credential. A session of their own means the
+        # Authorization header above can never ride along to a storage endpoint
+        # that has no use for it.
         self._uploads = upload_session or requests.Session()
         self._uploads.headers["User-Agent"] = agent
 
@@ -297,6 +302,79 @@ class HttpClient:
                     body=(response.text or "")[:500],
                 )
             return
+
+    # ------------------------------------------------------------------ downloads
+
+    def download_file(
+        self,
+        url: str,
+        path: str,
+        *,
+        size: int | None = None,
+        progress: Callable[[int, int | None], None] | None = None,
+        retries: int | None = None,
+    ) -> None:
+        """GET a signed URL into ``path``, resuming a partial download.
+
+        The body is written to ``path + ".part"`` and renamed to ``path`` only
+        once complete, and with ``size``, only at that length: an interrupted
+        download leaves the part to resume from, never a truncated file that
+        looks finished. ``progress(done, total)`` is called as bytes arrive.
+        """
+        budget = self.retries if retries is None else retries
+        part = path + ".part"
+        attempt = 0
+        while True:
+            done = os.path.getsize(part) if os.path.exists(part) else 0
+            if size is not None and done >= size:
+                break
+            headers = {"Range": f"bytes={done}-"} if done else {}
+            try:
+                with self._uploads.get(
+                    url, headers=headers, stream=True, timeout=DOWNLOAD_TIMEOUT, verify=self.verify
+                ) as response:
+                    status = response.status_code
+                    if status in RETRY_STATUSES and attempt < budget:
+                        self._pause(attempt, _retry_after(response), f"download answered {status}")
+                        attempt += 1
+                        continue
+                    if status == 416 and done:  # the part is already the whole file
+                        break
+                    if status >= 400:
+                        raise ApiError(
+                            f"download returned {status}: {(response.text or '')[:300]}",
+                            status=status,
+                            body=(response.text or "")[:500],
+                        )
+                    # 200 to a range request: the server sent the whole body again
+                    mode = "ab" if done and status == 206 else "wb"
+                    done = done if mode == "ab" else 0
+                    total = size
+                    with open(part, mode) as handle:
+                        for chunk in response.iter_content(DOWNLOAD_CHUNK):
+                            handle.write(chunk)
+                            done += len(chunk)
+                            if progress is not None:
+                                progress(done, total)
+            except _RETRYABLE_EXCEPTIONS as exc:
+                if attempt < budget and not isinstance(exc, requests.exceptions.SSLError):
+                    self._pause(attempt, None, f"download: {exc}")
+                    attempt += 1
+                    continue
+                raise TransportError(f"download from signed URL failed: {exc}") from exc
+            except requests.exceptions.RequestException as exc:
+                raise TransportError(f"download from signed URL failed: {exc}") from exc
+            if size is not None and done < size and attempt < budget:
+                # The stream ended early without an error; ask for the rest
+                self._pause(attempt, None, f"download ended at {done} of {size} bytes")
+                attempt += 1
+                continue
+            break
+
+        got = os.path.getsize(part) if os.path.exists(part) else 0
+        if size is not None and got != size:
+            raise TransportError(f"downloaded {got} of {size} bytes; run again to resume")
+        os.replace(part, path)
 
     def close(self) -> None:
         self.session.close()

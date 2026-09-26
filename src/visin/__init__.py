@@ -15,6 +15,7 @@ from ._internal.config import Settings, read_settings
 from ._internal.console import enable_console_logging
 from ._version import __version__
 from .api import Api, flatten
+from .datasets import Datasets
 from .errors import ApiError, ConfigurationError, TransportError, VisinError
 from .offline import SyncResult, pending, sync
 from .run import Run, epoch_uuid_for, init
@@ -24,6 +25,7 @@ __all__ = [
     "init",
     "Run",
     "Api",
+    "Datasets",
     "sync",
     "pending",
     "SyncResult",

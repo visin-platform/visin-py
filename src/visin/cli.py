@@ -5,6 +5,8 @@ visin check --write    ...and may it create a run? (makes one, then deletes it)
 visin sync             send reports kept on disk by offline or cut-off runs
 visin sync --list      show what is waiting, send nothing
 visin runs             list recent runs
+visin datasets         list the datasets on Visin
+visin download zod     download a dataset (once) and print its folder
 visin version
 """
 
@@ -229,6 +231,36 @@ def cmd_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_datasets(args: argparse.Namespace) -> int:
+    from .datasets import Datasets
+
+    try:
+        with Datasets(args.url, args.token) as datasets:
+            found = datasets.list(search=args.search)
+    except VisinError as exc:
+        print(f"visin datasets: {exc}", file=sys.stderr)
+        return 1
+    for dataset in found:
+        size = (dataset.get("archive") or {}).get("size")
+        shown = f"{size / 2**30:6.1f} GB" if size else "  no zip "
+        print(f"{dataset.get('_id') or dataset.get('id', ''):24}  {shown}  {dataset.get('name', '')}")
+    return 0
+
+
+def cmd_download(args: argparse.Namespace) -> int:
+    from .datasets import Datasets
+
+    logging.getLogger("visin").setLevel(logging.INFO)  # show the progress
+    try:
+        with Datasets(args.url, args.token, directory=args.dir) as datasets:
+            root = datasets.download(args.dataset)
+    except VisinError as exc:
+        print(f"visin download: {exc}", file=sys.stderr)
+        return 1
+    print(root)
+    return 0
+
+
 def cmd_version(_args: argparse.Namespace) -> int:
     print(f"visin {__version__}")
     return 0
@@ -270,6 +302,21 @@ def build_parser() -> argparse.ArgumentParser:
     runs.add_argument("--status", choices=["pending", "running", "completed", "failed"])
     runs.add_argument("--limit", type=int, default=20)
     runs.set_defaults(handler=cmd_runs)
+
+    def dataset_server(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--url", help="the Visin dataset service (default: VISIN_DATASET_URL)")
+        sub.add_argument("--token", help="the credential, for private datasets (default: VISIN_TOKEN)")
+
+    datasets = commands.add_parser("datasets", help="list the datasets on Visin")
+    dataset_server(datasets)
+    datasets.add_argument("--search", help="only datasets whose name matches")
+    datasets.set_defaults(handler=cmd_datasets)
+
+    download = commands.add_parser("download", help="download a dataset (once) and print its folder")
+    dataset_server(download)
+    download.add_argument("dataset", help="its name (e.g. zod) or id")
+    download.add_argument("--dir", help="where datasets go (default: VISIN_DATA_DIR)")
+    download.set_defaults(handler=cmd_download)
 
     version = commands.add_parser("version", help="print the version")
     version.set_defaults(handler=cmd_version)

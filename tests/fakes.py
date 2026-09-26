@@ -77,13 +77,57 @@ class FakeSession:
         return [c["json"] for c in self.calls if c["method"] == method and c["url"].endswith(fragment)]
 
 
+class FakeStream:
+    """A streamed download response: a status and a body, served in chunks."""
+
+    def __init__(self, status=200, body=b"", text="", fail_after=None):
+        self.status_code = status
+        self.body = body
+        self.text = text
+        self.fail_after = fail_after  # raise this exception after the first chunk
+
+    def iter_content(self, chunk_size):
+        for start in range(0, len(self.body), max(1, min(chunk_size, 1024))):
+            yield self.body[start : start + 1024]
+            if self.fail_after is not None:
+                raise self.fail_after
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
 class FakeUploads:
-    """Stands in for the signed-URL session: records what was PUT."""
+    """Stands in for the signed-URL session: records what was PUT, and serves
+    ``files`` ({url: bytes}) to GETs, honouring Range."""
 
     def __init__(self):
         self.headers = {}
         self.puts = []
         self.answers = []
+        self.files = {}
+        self.gets = []
+        self.get_answers = []
+
+    def get(self, url, headers=None, stream=False, timeout=None, verify=None):
+        self.gets.append({"url": url, "headers": headers or {}})
+        if self.get_answers:
+            answer = self.get_answers.pop(0)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        body = self.files.get(url)
+        if body is None:
+            return FakeStream(404, text="no such file")
+        requested = (headers or {}).get("Range", "")
+        if requested.startswith("bytes="):
+            start = int(requested[len("bytes=") :].rstrip("-"))
+            if start >= len(body):
+                return FakeStream(416)
+            return FakeStream(206, body[start:])
+        return FakeStream(200, body)
 
     def put(self, url, data=None, headers=None, timeout=None, verify=None):
         self.puts.append({"url": url, "bytes": data.read(), "headers": headers})

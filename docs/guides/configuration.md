@@ -12,6 +12,8 @@ Every setting can come from the environment, which keeps tokens out of code, or 
 | `VISIN_MODE` | `mode=` | `online` (the default), `offline` or `disabled`. |
 | `VISIN_DIR` | `directory=` | Where reports wait when they cannot be sent. Default `~/.visin`. |
 | `VISIN_VERIFY_SSL` | | `0` turns off TLS verification, for a self-signed development server only. |
+| `VISIN_DATASET_URL` | `Datasets(url=)` | The dataset service's address, such as `https://dataset-api.example.com`. Datasets are served apart from runs. |
+| `VISIN_DATA_DIR` | `Datasets(directory=)` | Where downloaded datasets go. Default `~/.cache/visin/datasets` (`$XDG_CACHE_HOME/visin/datasets`). |
 
 `VISIN_API_URL`, `VISIN_API_TOKEN` and `VISIN_PROJECT_ID`, the names earlier versions used, are still
 read.
