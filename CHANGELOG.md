@@ -10,6 +10,8 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-26
+
 ### Added
 
 - `visin.init()`, the one call most scripts need: registers a run, or attaches to the one
@@ -41,4 +43,9 @@ one, together with anything written by hand under Unreleased.
 - A warning when an epoch logged again is kept at its first recorded values.
 - `visin.enable_console_logging()`.
 
-[Unreleased]: https://github.com/visin-platform/visin-py/commits/main
+### Fixed
+
+- github release flow
+
+[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/visin-platform/visin-py/releases/tag/v0.1.0
