@@ -81,7 +81,11 @@ def body_schema(operation, spec):
 @pytest.fixture
 def recorded(server, session, uploads, tmp_path, monkeypatch):
     """Drive every public entry point once and return what was sent."""
-    session.route("POST", "/trainings", ok({"_id": "0123456789abcdef01234567", "uuid": "u"}, 201))
+    session.route(
+        "POST",
+        "/trainings",
+        ok({"_id": "0123456789abcdef01234567", "uuid": "u", "projectId": "0123456789abcdef01234569"}, 201),
+    )
     session.route("POST", "/configs/upload", ok({"_id": "0123456789abcdef01234568"}, 201))
     session.route(
         "POST",
@@ -110,7 +114,7 @@ def recorded(server, session, uploads, tmp_path, monkeypatch):
         run.update(tags=["done"], name="renamed", description="d", metadata={"best": 1})
 
     monkeypatch.setenv("VISIN_MODE", "offline")
-    visin.init("offline run").finish()
+    visin.init("offline run", project="road-seg").finish()
     monkeypatch.delenv("VISIN_MODE")
     visin.sync()
 
@@ -173,3 +177,8 @@ def test_every_body_satisfies_its_schema_and_sends_nothing_the_server_would_stri
         "POST /visualizations",
     ):
         assert operation in checked, f"{operation} was never exercised"
+
+
+def test_config_upload_inherits_the_training_project(recorded):
+    configs = [call["json"] for call in recorded if call["url"].endswith("/configs/upload")]
+    assert configs and all(body["projectId"] == "0123456789abcdef01234569" for body in configs)

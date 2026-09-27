@@ -26,7 +26,7 @@ reports nothing.
 
 ```sh
 export VISIN_URL=https://vision-api.example.com
-export VISIN_TOKEN=…            # a project token, from the project's Settings → API Tokens
+export VISIN_TOKEN=…            # a pipeline key, from the project's Settings → Pipeline keys
 visin check --write             # confirm this machine can report
 ```
 

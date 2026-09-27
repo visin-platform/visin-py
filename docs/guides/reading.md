@@ -1,7 +1,7 @@
 # Reading runs back
 
 `visin.Api` reads what Visin holds, for notebooks and analysis scripts. Use a user API key with read
-scopes (**Account → API keys**). A project token also works, but sees only its own project.
+scopes (**Account → API keys**). A pipeline key also works, but sees only its own project.
 
 ```python
 from visin import Api

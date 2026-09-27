@@ -6,8 +6,8 @@ Every setting can come from the environment, which keeps tokens out of code, or 
 | Variable | `init` argument | Meaning |
 | --- | --- | --- |
 | `VISIN_URL` | `url=` | Your deployment's API address, such as `https://vision-api.example.com`. `…/api` works too. |
-| `VISIN_TOKEN` | `token=` | A project token, or a user API key (`vsn_live_…`). |
-| `VISIN_PROJECT` | `project=` | The project's id or slug. Needed with a user API key; a project token's runs always go to its own project. |
+| `VISIN_TOKEN` | `token=` | An API key (`vsn_live_…`): a pipeline key from the project's settings, or one from **Account → API keys**. |
+| `VISIN_PROJECT` | `project=` | The project's id or slug. Needed with a key that is not limited to a project; a pipeline key's runs always go to its own project. |
 | `VISIN_TRAINING_UUID` | `training_uuid=` | Report into this run instead of creating one. |
 | `VISIN_MODE` | `mode=` | `online` (the default), `offline` or `disabled`. |
 | `VISIN_DIR` | `directory=` | Where reports wait when they cannot be sent. Default `~/.visin`. |

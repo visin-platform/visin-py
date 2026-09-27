@@ -35,6 +35,7 @@ class DeliveryContext:
 
     files: Path | None = None
     training_ids: dict[str, str] = field(default_factory=dict)
+    training_projects: dict[str, str] = field(default_factory=dict)
     # Attempts per request, when a caller cannot afford the client's full
     # budget: a run's blocking creation, or a catch-up that will be retried
     # in a minute anyway. None means the client's own.
@@ -54,6 +55,8 @@ def training_id(client: HttpClient, context: DeliveryContext, training_uuid: str
     ident = (found or {}).get("_id")
     if not ident:
         raise ApiError(f"no training with uuid {training_uuid}", status=404)
+    if (found or {}).get("projectId"):
+        context.training_projects[training_uuid] = str(found["projectId"])
     context.training_ids[training_uuid] = ident
     return str(ident)
 
@@ -110,16 +113,33 @@ def _create_run(client: HttpClient, body: dict[str, Any], context: DeliveryConte
     ident = (training or {}).get("_id")
     if ident:
         context.training_ids[uuid] = str(ident)
+    if (training or {}).get("projectId"):
+        context.training_projects[uuid] = str(training["projectId"])
     return training
 
 
 def _config(client: HttpClient, op: dict[str, Any], body: dict[str, Any], context: DeliveryContext) -> Any:
+    training_uuid = op.get("training_uuid")
+    # Use the run's actual project, including for resumed runs and offline replay.
+    # A pipeline key may have put the run in a different project than requested.
+    project = context.training_projects.get(training_uuid or "")
+    if not project and training_uuid:
+        training = (
+            client.request("GET", f"/trainings/uuid/{quote(training_uuid, safe='')}", retries=context.retries)
+            or {}
+        )
+        project = training.get("projectId")
+        if project:
+            context.training_projects[training_uuid] = str(project)
+        if training.get("_id"):
+            context.training_ids[training_uuid] = str(training["_id"])
+    if project:
+        body = {**body, "projectId": project}
     config = client.request("POST", "/configs/upload", json=body, retries=context.retries)
     config_id = (config or {}).get("_id")
     training_uuid = op.get("training_uuid")
     if config_id and training_uuid:
-        # A config nobody points at is a row in a library. Linking it is what
-        # makes it this run's config, shown on the run's page.
+        # The config belongs to the project; linking it also shows it on this run.
         ident = training_id(client, context, training_uuid)
         client.request("PUT", f"/trainings/{ident}", json={"configId": config_id}, retries=context.retries)
     return config

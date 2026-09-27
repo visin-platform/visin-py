@@ -33,10 +33,10 @@ def _credential_kind(token: str | None) -> str:
     if not token:
         return "none"
     if token.startswith("vsn_live_"):
-        return "user API key"
+        return "API key"
     if token.count(".") == 2:
         return "JWT"
-    return "project token"
+    return "unrecognised token"
 
 
 def _mask(token: str | None) -> str:
@@ -110,12 +110,14 @@ def _check(client: HttpClient, token: str | None, project: str | None, write: bo
             project_id = found.get("_id")
             out.ok(f"project {found.get('name', project)!r} is visible")
         except ApiError as exc:
-            hint = " (a project token sees only its own project)" if exc.status in (403, 404) else ""
+            hint = " (a pipeline key sees only its own project)" if exc.status in (403, 404) else ""
             out.fail(f"project {project!r}: {exc}{hint}")
         except VisinError as exc:
             out.fail(f"project {project!r}: {exc}")
-    elif _credential_kind(token) == "project token":
-        out.info("runs go to the token's own project")
+    elif _credential_kind(token) == "API key":
+        out.info("runs go to the key's project if it is a pipeline key; otherwise set VISIN_PROJECT")
+    if _credential_kind(token) == "unrecognised token":
+        out.info("this is not an API key: create a pipeline key in the project's Settings")
 
     if not write:
         if not out.failed:
@@ -139,12 +141,13 @@ def _check_write(client: HttpClient, project: str | None, project_id: str | None
         out.ok(f"created a test run ({run_uuid})")
         landed = training.get("projectId")
         if project_id and landed and str(landed) != str(project_id):
-            # A project token writes to its own project whatever the request names.
-            out.fail(
-                f"the run went to project {landed}, not {project!r}: the token belongs to another project"
-            )
+            # A pipeline key writes to its own project whatever the request names.
+            out.fail(f"the run went to project {landed}, not {project!r}: the key belongs to another project")
     except VisinError as exc:
-        out.fail(f"could not create a run: {exc}")
+        if not project and isinstance(exc, ApiError) and exc.status == 400 and "project" in str(exc).lower():
+            out.fail("This key needs a project: pass --project <id-or-slug> or set VISIN_PROJECT")
+        else:
+            out.fail(f"could not create a run: {exc}")
         return 1
     try:
         client.request(

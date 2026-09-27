@@ -138,8 +138,8 @@ class HttpClient:
             self.session.mount("http://", adapter)
             self.session.mount("https://", adapter)
         if token:
-            # A project token, a user API key and a user JWT are all presented
-            # this way; the server tells them apart itself.
+            # An API key and a user JWT are both
+            # presented this way; the server tells them apart itself.
             self.session.headers["Authorization"] = f"Bearer {token}"
         self.session.headers["User-Agent"] = agent
         self.session.headers["Accept"] = "application/json"

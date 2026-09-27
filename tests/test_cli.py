@@ -24,7 +24,8 @@ def test_check_passes_with_a_good_key(server, capsys, monkeypatch):
     monkeypatch.setenv("VISIN_TOKEN", "vsn_live_abcdefghijklmnop")
     code, out = run_cli(capsys, "check")
     assert code == 0, out
-    assert "user API key is accepted" in out
+    assert "API key is accepted" in out
+    assert "if it is a pipeline key" in out
     assert "vsn_…mnop" in out
 
 
@@ -41,10 +42,10 @@ def test_check_catches_an_unreachable_server(server, session, capsys):
     assert code == 1 and "could not reach" in out
 
 
-def test_check_passes_a_project_token_without_a_project(server, capsys):
-    # The server puts a project token's runs in its own project.
+def test_check_points_a_token_that_is_not_a_key_at_pipeline_keys(server, capsys):
     code, out = run_cli(capsys, "check")
-    assert code == 0 and "the token's own project" in out
+    assert code == 0 and "unrecognised token" in out
+    assert "create a pipeline key" in out
 
 
 def test_check_catches_a_project_the_token_cannot_see(server, session, capsys):
@@ -126,3 +127,19 @@ def test_runs_lists_recent_runs(server, session, capsys):
 def test_a_command_is_required(capsys):
     with pytest.raises(SystemExit):
         main([])
+
+
+def test_check_write_requires_a_project_for_an_unlimited_key(server, session, capsys, monkeypatch):
+    monkeypatch.setenv("VISIN_TOKEN", "vsn_live_unlimited")
+    session.route("POST", "/trainings", refused(400, "A training needs a project: pass projectId"))
+    code, out = run_cli(capsys, "check", "--write")
+    assert code == 1 and "--project" in out and "VISIN_PROJECT" in out
+    assert session.paths("DELETE") == []
+
+
+def test_check_write_accepts_a_pipeline_key_without_a_project(server, session, capsys, monkeypatch):
+    monkeypatch.setenv("VISIN_TOKEN", "vsn_live_pipeline")
+    session.route("POST", "/trainings", ok({"_id": "t1", "projectId": "p1"}, 201))
+    code, out = run_cli(capsys, "check", "--write")
+    assert code == 0, out
+    assert "/trainings/t1" in session.paths("DELETE")

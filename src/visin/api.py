@@ -2,7 +2,7 @@
 
 For notebooks and analysis scripts. Visin's documentation recommends a user API
 key with read scopes for this (``vsn_live_…``, made under **Account → API
-keys**); a project token works too, for its one project.
+keys**); a pipeline key works too, for its one project.
 
     from visin import Api
 

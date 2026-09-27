@@ -219,7 +219,7 @@ def test_benchmark_fills_in_the_system_info_visin_requires(client, session, monk
 
 
 def test_config_is_stored_and_linked_to_the_run(client, session):
-    session.route("GET", "/trainings/uuid/", ok({"_id": "t1"}))
+    session.route("GET", "/trainings/uuid/", ok({"_id": "t1", "projectId": "actual-project"}))
     session.route("POST", "/configs/upload", ok({"_id": "c1"}, 201))
     run = make_run(client)
     run.log_config({"lr": 1e-4, "batch": 8}, name="window16")
@@ -229,6 +229,7 @@ def test_config_is_stored_and_linked_to_the_run(client, session):
         "config_data": {"lr": 1e-4, "batch": 8},
         "summary": "window16",
         "config_name": "window16",
+        "projectId": "actual-project",
     }
     assert sent(session, "/trainings/t1", "PUT") == [{"configId": "c1"}]
 

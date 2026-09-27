@@ -11,13 +11,13 @@ Checks that this machine can report, before a long job finds out that it can't:
 $ visin check --write
 visin 0.1.0
   url      https://vision-api.example.com
-  token    3f9a…c21e (project token)
+  token    vsn_…c21e (API key)
   project  road-seg
   mode     online
   kept in  /home/me/.visin
 
   ok    reached https://vision-api.example.com/api
-  ok    the project token is accepted
+  ok    the API key is accepted
   ok    project 'Road segmentation' is visible
   ok    created a test run (0b6f…)
   ok    sent an epoch to it
@@ -54,3 +54,8 @@ Lists recent runs: their UUID, status, last update and name.
 Prints the installed version.
 
 Add `-v` before any command (`visin -v sync`) to log each request.
+
+`visin check --write` requires `--project <id-or-slug>` (or `VISIN_PROJECT`) with an
+unlimited API key. A pipeline key supplies its own project. The CLI reports a
+missing project when the server refuses the test run; it cannot tell the two
+kinds of API key apart from the token text.

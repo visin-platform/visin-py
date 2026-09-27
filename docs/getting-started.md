@@ -17,18 +17,19 @@ Optional extras:
 
 ## 2. Get a token
 
-A run belongs to a project. In Visin, open the project, go to **Settings → API Tokens** and choose
-**Generate New Token**. Copy it now, because it is shown only once.
+A run belongs to a project. In Visin, open the project, go to **Settings → Pipeline keys** and
+choose **New pipeline key**. Copy the two lines it shows.
 
-A project token can write only to its own project. A user API key (`vsn_live_…`, under **Account →
-API keys**) also works, and is the one to use for reading runs across projects.
+A pipeline key can write only to its own project. An API key that is not limited to a project
+(`vsn_live_…`, under **Account → API keys**) also works, and is the one to use for reading runs
+across projects.
 
 ## 3. Tell the script where Visin is
 
 ```sh
 export VISIN_URL=https://vision-api.example.com   # your deployment's API address
-export VISIN_TOKEN=paste-your-token-here
-export VISIN_PROJECT=road-seg                      # id or slug; optional with a project token
+export VISIN_TOKEN=vsn_live_…
+export VISIN_PROJECT=road-seg                      # id or slug; optional with a pipeline key
 ```
 
 Check the setup before your first real run:

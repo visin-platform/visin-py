@@ -292,9 +292,9 @@ class Run:
     ) -> Run:
         """Register a new run and return it.
 
-        ``project`` is the project's id or slug. With a project token it can be
-        left out: the server puts the run in the token's project, whatever
-        ``project`` says. ``model`` travels
+        ``project`` is the project's id or slug. With a pipeline key (an API key
+        limited to a project) it can be left out: the server puts the run in the
+        key's project, whatever ``project`` says. ``model`` travels
         under ``metadata``, and ``dataset`` fills ``datasetId`` as well.
 
         With ``training_uuid`` (or ``VISIN_TRAINING_UUID``) naming a run that
