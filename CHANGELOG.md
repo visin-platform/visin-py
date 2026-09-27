@@ -10,6 +10,14 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-27
+
+### Fixed
+
+- drop legacy project token wording
+
+[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/visin-platform/visin-py/compare/v0.2.0...v0.2.1
 ## [0.2.0] - 2026-09-26
 
 ### Added
@@ -20,7 +28,6 @@ one, together with anything written by hand under Unreleased.
   (default `~/.cache/visin/datasets`), and is not repeated once complete.
 - add datasets download to library
 
-[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/visin-platform/visin-py/compare/v0.1.0...v0.2.0
 ## [0.1.0] - 2026-09-26
 
