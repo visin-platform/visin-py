@@ -10,13 +10,20 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-30
+
+### Added
+
+- return typed models, separate create from attach, raise on refused startup
+
+[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/visin-platform/visin-py/compare/v0.2.1...v0.3.0
 ## [0.2.1] - 2026-09-27
 
 ### Fixed
 
 - drop legacy project token wording
 
-[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/visin-platform/visin-py/compare/v0.2.0...v0.2.1
 ## [0.2.0] - 2026-09-26
 
