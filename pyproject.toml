@@ -97,9 +97,25 @@ line-length = 110
 target-version = "py39"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B"]
+select = [
+  "E", "F", "W", "I", "UP", "B",
+  "C4", "SIM", "RUF", "PT", "PIE", "RET", "PERF", "FURB", "LOG", "G", "A", "ISC", "PGH",
+  "ERA", "S", "T20", "PLC0415",
+  "D100", "D101", "D102", "D103", "D104",
+]
+ignore = ["S110", "S603", "S311"]
 
 [tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108", "PLC0415", "PT011", "PT018", "T201", "D"]
+"scripts/**" = ["T201", "S607", "D"]
+"src/visin/api.py" = ["PLC0415"]
+"src/visin/cli.py" = ["T201", "PLC0415", "D103"]
+"src/visin/system.py" = ["PLC0415"]
+"src/visin/_internal/inputs.py" = ["PLC0415"]
+"src/visin/run.py" = ["S101", "PERF203"]
+"src/visin/integrations/*.py" = ["D102"]
+"src/visin/_internal/*.py" = ["D100", "D101", "D102", "D103", "D104"]
+"src/visin/offline.py" = ["S101"]
 # Optional[...] and Union[...] spell the runtime type aliases 3.9 evaluates.
 "src/visin/_internal/transport.py" = ["UP006", "UP007", "UP035"]
 
@@ -131,7 +147,7 @@ omit = ["src/visin/__main__.py"]
 
 [tool.coverage.report]
 # Sits just below current coverage; raise it when you add coverage.
-fail_under = 92
+fail_under = 93
 show_missing = true
 skip_covered = true
 exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "pragma: no cover"]

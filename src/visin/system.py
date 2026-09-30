@@ -149,7 +149,7 @@ def _torch_cuda() -> Any:
         return None
     try:
         return torch.cuda if torch.cuda.is_available() else None
-    except Exception:  # noqa: BLE001 - a broken CUDA install must not break reporting
+    except Exception:
         return None
 
 
@@ -189,7 +189,7 @@ def system_info() -> dict[str, Any]:
                 info["gpu_name"] = cuda.get_device_name(0)
                 info["gpu_memory_total_gb"] = round(cuda.get_device_properties(0).total_memory / _GB, 1)
                 info["gpu_count"] = cuda.device_count()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
     return info
 
@@ -251,7 +251,7 @@ def system_metrics() -> dict[str, Any]:
                 "memory_gb": round(process.memory_info().rss / _GB, 2),
                 "threads": process.num_threads(),
             }
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     gpus: dict[str, dict[str, Any]] = {}
@@ -285,7 +285,7 @@ def system_metrics() -> dict[str, Any]:
                 gpu["memory_used_gb"] = round(cuda.memory_allocated(index) / _GB, 2)
                 gpu["memory_reserved_gb"] = round(cuda.memory_reserved(index) / _GB, 2)
                 gpu["memory_max_gb"] = round(cuda.max_memory_allocated(index) / _GB, 2)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     if gpus:

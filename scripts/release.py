@@ -150,7 +150,7 @@ def _merge(hand_written: str, generated: dict[str, list[str]]) -> str:
     order = SECTION_ORDER + [name for name in sections if name not in SECTION_ORDER]
     parts = ["\n".join(loose)] if loose else []
     for name in order:
-        lines = [line for line in sections.get(name, [])]
+        lines = list(sections.get(name, []))
         while lines and not lines[-1].strip():
             lines.pop()
         if lines:
@@ -178,7 +178,9 @@ def update_changelog(
 def release_notes(text: str, version: str) -> str:
     """One version's entry, for the GitHub release."""
     match = re.search(
-        rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|^\[[^\]]+\]: |\Z)", text, re.M | re.S
+        rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|^\[[^\]]+\]: |\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
     )
     if not match:
         raise ValueError(f"no changelog entry for {version}")

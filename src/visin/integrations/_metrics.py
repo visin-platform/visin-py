@@ -35,8 +35,7 @@ def split_metrics(metrics: Mapping[str, Any], default: str = "train") -> dict[st
         name = str(raw)
         if name in _NOT_METRICS or name.endswith("_step"):
             continue
-        if name.endswith("_epoch"):
-            name = name[: -len("_epoch")]
+        name = name.removesuffix("_epoch")
         group = default
         for candidate, prefixes in _PREFIXES:
             match = next((prefix for prefix in prefixes if name.startswith(prefix)), None)

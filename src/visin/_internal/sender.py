@@ -13,6 +13,7 @@ calls it.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import threading
@@ -88,7 +89,7 @@ class Sender:
                     self.leftover.append(item)
                     continue
                 item()
-            except Exception as exc:  # noqa: BLE001 - a reporting failure must not kill the thread
+            except Exception as exc:
                 self.failed += 1
                 logger.warning("visin: report failed: %s", exc)
             finally:
@@ -135,9 +136,7 @@ class Sender:
                 if item is not None and not isinstance(item, _Barrier):
                     self.leftover.append(item)
                 self._queue.task_done()
-        try:
+        with contextlib.suppress(queue.Full):
             self._queue.put_nowait(None)
-        except queue.Full:  # pragma: no cover - just drained
-            pass
         self._thread.join(timeout=5.0 if flushed else 0.1)
         return flushed

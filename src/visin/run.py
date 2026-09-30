@@ -3,26 +3,20 @@ that makes it."""
 
 from __future__ import annotations
 
-import argparse
 import atexit
-import dataclasses
 import functools
 import logging
-import math
-import operator
 import os
-import signal
-import sys
-import threading
 import time
 import uuid as uuidlib
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 from typing import Any
 
 from . import system as _system
 from ._internal.config import Settings, read_settings
+from ._internal.inputs import as_mapping, default_name, epoch_number, merge_results, now
+from ._internal.process import ProcessHooks, rank
 from ._internal.reports import DeliveryContext, deliver, discard_staged
 from ._internal.sender import Sender
 from ._internal.serialize import to_jsonable
@@ -80,139 +74,11 @@ def epoch_uuid_for(training_uuid: str, epoch: int | float) -> str:
     return str(uuidlib.uuid5(_EPOCH_NS, f"{training_uuid}:{epoch}"))
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _rank() -> int:
-    """This process's rank in a distributed job, 0 when it is not in one.
-
-    Every rank of a data-parallel job runs the same script, so without this a
-    four-GPU run would report each epoch four times.
-    """
-    for name in ("RANK", "SLURM_PROCID", "OMPI_COMM_WORLD_RANK", "PMI_RANK"):
-        raw = (os.getenv(name) or "").strip()
-        if raw.isdigit():
-            return int(raw)
-    return 0
-
-
-def _epoch_number(epoch: Any) -> int | float:
-    """An epoch as the number it names, so ``3``, ``3.0`` and ``np.int64(3)``
-    are one epoch with one UUID."""
-    if isinstance(epoch, bool):
-        raise TypeError("epoch must be a number")
-    if isinstance(epoch, int):
-        return epoch
-    try:
-        return operator.index(epoch)  # NumPy integers
-    except TypeError:
-        pass
-    value = float(epoch)
-    if not math.isfinite(value):
-        raise ValueError(f"epoch must be finite, not {epoch!r}")
-    return int(value) if value.is_integer() else value
-
-
-def _merge_results(
-    results: Mapping[str, Any] | None,
-    train: Mapping[str, Any] | None,
-    val: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    if results is not None and not isinstance(results, Mapping):
-        raise TypeError(f"results must be a dict, not {type(results).__name__}")
-    merged: dict[str, Any] = dict(results or {})
-    # ``train`` and ``val`` are where Visin's charts look: the training and the
-    # validation curve of each one.
-    for key, part in (("train", train), ("val", val)):
-        if part is None:
-            continue
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = dict(part)
-        elif isinstance(existing, Mapping):
-            merged[key] = {**existing, **part}
-        else:
-            raise ValueError(f"results[{key!r}] is not a dict, so {key}= cannot be added to it")
-    if not merged:
-        raise ValueError("log_epoch needs results, train= or val=")
-    return merged
-
-
-def _as_mapping(config: Any) -> dict[str, Any]:
-    """Accept the shapes a training config actually comes in."""
-    if isinstance(config, Mapping):
-        return dict(config)
-    if isinstance(config, argparse.Namespace):
-        return dict(vars(config))
-    if dataclasses.is_dataclass(config) and not isinstance(config, type):
-        return dataclasses.asdict(config)
-    if type(config).__module__.split(".")[0] == "omegaconf":  # Hydra
-        from omegaconf import OmegaConf  # type: ignore[import-not-found]
-
-        container = OmegaConf.to_container(config, resolve=True)
-        if isinstance(container, Mapping):
-            return dict(container)
-    for method in ("model_dump", "to_dict", "dict"):  # pydantic 2, many, pydantic 1
-        convert = getattr(config, method, None)
-        if callable(convert):
-            value = convert()
-            if isinstance(value, Mapping):
-                return dict(value)
-    raise TypeError(f"cannot read a config from a {type(config).__name__}; pass a dict")
-
-
-def _default_name() -> str:
-    script = Path(sys.argv[0]).stem if sys.argv and sys.argv[0] not in ("", "-c") else "run"
-    return f"{script} {datetime.now():%Y-%m-%d %H:%M}"
-
-
-class _ProcessHooks:
-    """Once per process: learn how it ended, so an unfinished run is marked right.
-
-    Python's default answer to SIGTERM, which is what a scheduler sends before
-    it kills a job, is to die on the spot: no ``finally``, no ``atexit``, so the
-    epochs still queued were lost and the run stayed "running" forever. Turning
-    it into ``SystemExit`` lets the ordinary shutdown path run. Only when nobody
-    else has claimed the signal: Lightning, for one, installs its own handler to
-    requeue on SLURM, and that must win.
-    """
-
-    installed = False
-    crashed = False
-    terminated = False
-
-    @classmethod
-    def install(cls) -> None:
-        if cls.installed:
-            return
-        cls.installed = True
-        previous = sys.excepthook
-
-        def excepthook(exc_type: Any, exc: Any, tb: Any) -> None:
-            cls.crashed = True
-            previous(exc_type, exc, tb)
-
-        sys.excepthook = excepthook
-        if threading.current_thread() is not threading.main_thread():
-            return
-        try:
-            if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
-                signal.signal(signal.SIGTERM, cls._on_sigterm)
-        except (AttributeError, OSError, ValueError):  # pragma: no cover - platform without SIGTERM
-            pass
-
-    @classmethod
-    def _on_sigterm(cls, signum: int, _frame: Any) -> None:
-        cls.terminated = True
-        raise SystemExit(128 + signum)
-
-
 class Run:
     """A training run, as Visin sees it.
 
-    Make one with :func:`visin.init`, or with :meth:`create`, :meth:`attach`
-    or :meth:`from_env` when you want to say which. A run is in one of three
+    Make one with :func:`visin.init` (or :meth:`create`) to register a run, or
+    with :meth:`attach` to report into one that already exists. A run is in one of three
     modes:
 
     * ``online`` sends reports as they are made, from a background thread. If
@@ -223,9 +89,13 @@ class Run:
     * ``disabled`` reports nothing: no server configured, or a process that is
       not rank zero of a distributed job. The same script still runs.
 
-    Nothing on this class raises by default. A metrics backend is not worth a
-    training job, so failures are logged and counted, and :meth:`finish`
-    reports the tally. Pass ``strict=True`` to get exceptions instead.
+    Starting a run raises when Visin refuses it outright (a bad token, a
+    project the key does not cover): that is a setup mistake, and the person
+    starting the job is there to read it. Being unreachable does not raise; the
+    run carries on and keeps its reports on disk. After that nothing on this
+    class raises by default: a metrics backend is not worth a training job, so
+    failures are logged and counted, and :meth:`finish` reports the tally. Pass
+    ``strict=True`` to get exceptions there too.
     """
 
     def __init__(
@@ -262,7 +132,7 @@ class Run:
         self._delivered_epochs: set[str] = set()
         self.last_epoch: int | float | None = None
         if self.mode != "disabled":
-            _ProcessHooks.install()
+            ProcessHooks.install()
             # A run killed by an exception, or cut off by the scheduler, should
             # still leave behind the epochs it managed to produce.
             atexit.register(self._at_exit)
@@ -298,14 +168,17 @@ class Run:
         under ``metadata``, and ``dataset`` fills ``datasetId`` as well.
 
         With ``training_uuid`` (or ``VISIN_TRAINING_UUID``) naming a run that
-        already exists, that run is reported into rather than duplicated, so
-        a restarted job carries on where it was.
+        already exists, that run is resumed rather than duplicated, so a
+        restarted job carries on where it was; :attr:`resumed` says which
+        happened.
+
+        Raises :class:`~visin.errors.ApiError` when Visin refuses the run.
         """
         full_name = (name or "").strip()
         if not full_name:
             raise ConfigurationError("a run needs a name")
         settings = read_settings(url=url, token=token, project=project, mode=mode, directory=directory)
-        if settings.effective_mode == "disabled" or _rank() != 0:
+        if settings.effective_mode == "disabled" or rank() != 0:
             return cls._disabled(settings)
 
         run_uuid = training_uuid or settings.training_uuid or str(uuidlib.uuid4())
@@ -318,7 +191,7 @@ class Run:
             "uuid": run_uuid,
             "name": full_name[:MAX_NAME],
             "status": "running",
-            "startTime": _now(),
+            "startTime": now(),
         }
         if combined:
             payload["metadata"] = combined
@@ -335,7 +208,11 @@ class Run:
         # full text rather than dropping it.
         if not description and len(full_name) > MAX_NAME:
             description = full_name
+        if len(full_name) > MAX_NAME:
+            logger.warning("visin: run name truncated to %d characters", MAX_NAME)
         if description:
+            if len(description) > MAX_DESCRIPTION:
+                logger.warning("visin: description truncated to %d characters", MAX_DESCRIPTION)
             payload["description"] = description[:MAX_DESCRIPTION]
 
         run = cls._build(settings, run_uuid, strict=strict, system_metrics=system_metrics, name=full_name)
@@ -353,7 +230,7 @@ class Run:
     @classmethod
     def attach(
         cls,
-        training_uuid: str,
+        training_uuid: str | None = None,
         *,
         url: str | None = None,
         token: str | None = None,
@@ -365,34 +242,28 @@ class Run:
     ) -> Run:
         """Report into a run that already exists, without registering it.
 
+        ``training_uuid`` defaults to ``VISIN_TRAINING_UUID``, the variable an
+        orchestrator exports for the processes it launches; with neither, this
+        raises :class:`~visin.errors.ConfigurationError`. A disabled setup
+        returns a run that reports nothing, so the script still runs.
+
         Pass ``mark_status=False`` from a script that adds to a run it does not
         own, such as a test or benchmark script run after training: its
         ``finish``, and its exit, crash included, then leave the run's status
         alone instead of marking the training completed or failed.
         """
         settings = read_settings(url=url, token=token, mode=mode, directory=directory)
-        if settings.effective_mode == "disabled" or _rank() != 0:
+        if settings.effective_mode == "disabled" or rank() != 0:
             return cls._disabled(settings)
+        training_uuid = training_uuid or settings.training_uuid
+        if not training_uuid:
+            raise ConfigurationError(
+                "no run to attach to: pass a training UUID or set VISIN_TRAINING_UUID. "
+                "Use visin.init(...) to register a run instead."
+            )
         return cls._build(
             settings, training_uuid, strict=strict, system_metrics=system_metrics, mark_status=mark_status
         )
-
-    @classmethod
-    def from_env(cls, *, strict: bool = False, system_metrics: bool = False) -> Run:
-        """Report into the run an orchestrator named in ``VISIN_TRAINING_UUID``.
-
-        Returns a disabled run when the environment names no server, so the
-        same script runs unchanged on a laptop with no Visin in sight.
-        """
-        settings = read_settings()
-        if settings.effective_mode == "disabled" or _rank() != 0:
-            return cls._disabled(settings)
-        if not settings.training_uuid:
-            raise ConfigurationError(
-                "VISIN_TRAINING_UUID is not set. Use visin.init(...) or Run.create(...) to register a "
-                "run, or set the variable if something else already created one."
-            )
-        return cls._build(settings, settings.training_uuid, strict=strict, system_metrics=system_metrics)
 
     @classmethod
     def disabled(cls) -> Run:
@@ -401,8 +272,8 @@ class Run:
 
     @classmethod
     def _disabled(cls, settings: Settings) -> Run:
-        if _rank() != 0:
-            logger.debug("visin: rank %d of a distributed job; only rank 0 reports", _rank())
+        if rank() != 0:
+            logger.debug("visin: rank %d of a distributed job; only rank 0 reports", rank())
         else:
             if settings.mode == "disabled":
                 logger.info("visin: VISIN_MODE=disabled, so reporting is off")
@@ -429,7 +300,8 @@ class Run:
             spool = None  # online without a safety net, rather than not at all
         client = None
         if settings.effective_mode == "online":
-            assert settings.url and settings.token
+            assert settings.url
+            assert settings.token
             client = HttpClient(settings.url, settings.token, verify=settings.verify_ssl)
         return cls(
             training_uuid=training_uuid,
@@ -482,10 +354,11 @@ class Run:
                 )
                 return
             # Refused outright: a bad token, or a project the token does not
-            # cover. Every epoch would be refused the same way, so stop here
-            # rather than fail each one.
-            self._handle(exc, "create run")
+            # cover. Every epoch would be refused the same way, and the person
+            # starting a job is there to read this, so say it now rather than
+            # let the run train unreported.
             self._disable()
+            raise
 
     def _disable(self) -> None:
         logger.warning("visin: nothing more will be reported for run %s", self.training_uuid)
@@ -498,6 +371,7 @@ class Run:
 
     @property
     def mode(self) -> str:
+        """``online``, ``offline`` or ``disabled``: what this run is doing with its reports."""
         if self._client is not None:
             return "online"
         if self._spool is not None:
@@ -506,6 +380,7 @@ class Run:
 
     @property
     def enabled(self) -> bool:
+        """Whether this run reports anywhere, now or later."""
         return self.mode != "disabled"
 
     @property
@@ -528,7 +403,7 @@ class Run:
         """The UUID this run's ``epoch`` has, whether or not it is sent yet."""
         if not self.training_uuid:
             return None
-        return epoch_uuid_for(self.training_uuid, _epoch_number(epoch))
+        return epoch_uuid_for(self.training_uuid, epoch_number(epoch))
 
     # ---------------------------------------------------------------- reporting
 
@@ -561,8 +436,8 @@ class Run:
         if not self._accepting() or not self.training_uuid:
             return None
         try:
-            number = _epoch_number(epoch)
-            merged = _merge_results(results, train, val)
+            number = epoch_number(epoch)
+            merged = merge_results(results, train, val)
             if system if system is not None else self._system_metrics:
                 merged.setdefault("system_info", _system.system_metrics())
             ep_uuid = epoch_uuid_for(self.training_uuid, number)
@@ -571,7 +446,7 @@ class Run:
                 "epoch_uuid": ep_uuid,
                 "epoch": number,
                 "results": merged,
-                "timestamp": timestamp or _now(),
+                "timestamp": timestamp or now(),
             }
             if learning_rate is not None:
                 payload["learning_rate"] = learning_rate
@@ -612,7 +487,7 @@ class Run:
         try:
             if test_results is None:
                 raise ValueError("log_test_results needs test_results")
-            number = _epoch_number(epoch)
+            number = epoch_number(epoch)
             # Generated here, not by the server, so a retried POST is answered
             # 409 instead of storing the result twice.
             test_uuid = test_uuid or str(uuidlib.uuid4())
@@ -622,7 +497,7 @@ class Run:
                     "epoch_uuid": epoch_uuid or epoch_uuid_for(self.training_uuid, number),
                     "test_uuid": test_uuid,
                     "test_results": test_results,
-                    "timestamp": timestamp or _now(),
+                    "timestamp": timestamp or now(),
                 },
                 "test results",
             )
@@ -658,7 +533,7 @@ class Run:
             if any(field not in info for field in BENCHMARK_SYSTEM_FIELDS):
                 info = {**_system.system_info(), **info}
             payload: dict[str, Any] = {
-                "timestamp": timestamp or _now(),
+                "timestamp": timestamp or now(),
                 "system_info": info,
                 "results": rows,
             }
@@ -668,7 +543,7 @@ class Run:
             if self.training_uuid and not epoch_uuid:
                 payload["training_uuid"] = self.training_uuid
             if epoch is not None:
-                number = _epoch_number(epoch)
+                number = epoch_number(epoch)
                 payload["epoch"] = number
                 if epoch_uuid:
                     payload["epoch_uuid"] = epoch_uuid
@@ -697,7 +572,7 @@ class Run:
         if not self._accepting():
             return
         try:
-            data = _as_mapping(config)
+            data = as_mapping(config)
             body: dict[str, Any] = {
                 "config_data": data,
                 "summary": str(summary or data.get("Summary") or name or self.name or "Config"),
@@ -743,7 +618,7 @@ class Run:
                     f"not {extension or 'a file without an extension'}: {source}"
                 )
             body: dict[str, Any] = {
-                "epoch_uuid": epoch_uuid or epoch_uuid_for(self.training_uuid, _epoch_number(epoch)),
+                "epoch_uuid": epoch_uuid or epoch_uuid_for(self.training_uuid, epoch_number(epoch)),
                 "filename": os.path.basename(source),
                 "type": kind,
                 "mimetype": content_type,
@@ -779,6 +654,8 @@ class Run:
             body["name"] = name.strip()[:MAX_NAME]
             self.name = name.strip()
         if description is not None:
+            if len(description) > MAX_DESCRIPTION:
+                logger.warning("visin: description truncated to %d characters", MAX_DESCRIPTION)
             body["description"] = description[:MAX_DESCRIPTION]
         if tags is not None:
             body["tags"] = [tags] if isinstance(tags, str) else list(tags)
@@ -881,7 +758,8 @@ class Run:
 
     def _catch_up(self, force: bool = False) -> bool:
         """Send what was kept while Visin was away. True once nothing is left."""
-        assert self._client is not None and self._spool is not None
+        assert self._client is not None
+        assert self._spool is not None
         if not force and time.monotonic() < self._next_catch_up:
             return False
         self._context.retries = CATCH_UP_RETRIES
@@ -920,7 +798,7 @@ class Run:
                 {
                     "op": "update",
                     "training_uuid": self.training_uuid,
-                    "body": {"status": status, "endTime": _now()},
+                    "body": {"status": status, "endTime": now()},
                 }
             )
         else:
@@ -936,7 +814,7 @@ class Run:
                 # One last try before the process goes away.
                 try:
                     self._catch_up(force=True)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("visin: could not send kept reports: %s", exc)
         self._summarise(status, flushed)
         if self._client is not None:
@@ -1002,7 +880,7 @@ class Run:
         # is queued is worth more than the status.
         if self._finished:
             return
-        crashed = _ProcessHooks.crashed or _ProcessHooks.terminated
+        crashed = ProcessHooks.crashed or ProcessHooks.terminated
         self.finish(status="failed" if crashed else "completed", timeout=15.0)
 
     def _handle(self, exc: BaseException, action: str) -> None:
@@ -1021,7 +899,7 @@ class Run:
         elif exc_type is SystemExit:
             # A bare exit code says little: say what ended the process.
             self.fail(
-                "terminated by SIGTERM" if _ProcessHooks.terminated else f"exited with status {exc.code}"
+                "terminated by SIGTERM" if ProcessHooks.terminated else f"exited with status {exc.code}"
             )
         else:
             self.fail(exc)
@@ -1053,30 +931,13 @@ def init(
 
     Reads ``VISIN_URL`` and ``VISIN_TOKEN`` (and ``VISIN_PROJECT``) from the
     environment unless given here, and returns a disabled run that reports
-    nothing when there is no server to report to.
-
-    When something else launched this process and exported
-    ``VISIN_TRAINING_UUID``, and no ``name`` is given, the run it names is
-    reported into. Otherwise a run is registered, named ``name`` or after the
-    script and the time.
+    nothing when there is no server to report to. Always registers a run,
+    named ``name`` or after the script and the time; with ``training_uuid`` (or
+    ``VISIN_TRAINING_UUID``) naming a run that exists, that run is resumed.
+    To report into a run without registering it, use :meth:`Run.attach`.
     """
-    settings = read_settings(url=url, token=token, mode=mode, directory=directory)
-    existing = training_uuid or settings.training_uuid
-    if name is None and existing:
-        run = Run.attach(
-            existing,
-            url=url,
-            token=token,
-            mode=mode,
-            directory=directory,
-            strict=strict,
-            system_metrics=system_metrics,
-        )
-        if config is not None:
-            run.log_config(config)
-        return run
     return Run.create(
-        name or _default_name(),
+        name or default_name(),
         project=project,
         dataset=dataset,
         model=model,

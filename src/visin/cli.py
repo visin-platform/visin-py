@@ -229,8 +229,8 @@ def cmd_runs(args: argparse.Namespace) -> int:
             print(f"visin runs: {exc}", file=sys.stderr)
             return 1
     for run in runs:
-        updated = str(run.get("updatedAt", ""))[:16].replace("T", " ")
-        print(f"{run.get('uuid', ''):36}  {run.get('status', ''):9}  {updated:16}  {run.get('name', '')}")
+        updated = (run.updated_at or "")[:16].replace("T", " ")
+        print(f"{run.uuid:36}  {run.status or '':9}  {updated:16}  {run.name}")
     return 0
 
 
@@ -244,9 +244,8 @@ def cmd_datasets(args: argparse.Namespace) -> int:
         print(f"visin datasets: {exc}", file=sys.stderr)
         return 1
     for dataset in found:
-        size = (dataset.get("archive") or {}).get("size")
-        shown = f"{size / 2**30:6.1f} GB" if size else "  no zip "
-        print(f"{dataset.get('_id') or dataset.get('id', ''):24}  {shown}  {dataset.get('name', '')}")
+        shown = f"{dataset.size / 2**30:6.1f} GB" if dataset.size else "  no zip "
+        print(f"{dataset.id:24}  {shown}  {dataset.name}")
     return 0
 
 

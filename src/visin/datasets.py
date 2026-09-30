@@ -29,13 +29,16 @@ from urllib.parse import quote
 
 from ._internal.config import read_settings
 from ._internal.transport import HttpClient
-from .errors import ConfigurationError, VisinError
+from .errors import ApiError, ConfigurationError, VisinError
+from .models import Dataset
 
 logger = logging.getLogger("visin")
 
 _OBJECT_ID = re.compile(r"^[0-9a-fA-F]{24}$")
 # Written last, after the zip is unpacked: a folder without it is incomplete.
 MARKER = ".visin-dataset.json"
+PAGE_SIZE = 100
+MAX_PAGES = 100
 
 
 class Datasets:
@@ -61,6 +64,7 @@ class Datasets:
         self.directory = settings.data_directory
 
     def close(self) -> None:
+        """Release the connection. ``with Datasets() as datasets`` does this for you."""
         self._client.close()
 
     def __enter__(self) -> Datasets:
@@ -71,45 +75,64 @@ class Datasets:
 
     # ---------------------------------------------------------------- reading
 
-    def list(self, search: str | None = None) -> list[dict[str, Any]]:
+    def list(self, search: str | None = None) -> list[Dataset]:
         """The datasets this credential can read (all public ones without a token)."""
-        params = {"limit": 100, **({"search": search} if search else {})}
-        data = self._client.request("GET", "/datasets", params=params)
-        if isinstance(data, dict):
-            data = data.get("datasets") or data.get("items") or []
-        return [dict(item) for item in data or []]
+        found: list[Dataset] = []
+        seen: set[str] = set()
+        for page in range(1, MAX_PAGES + 1):
+            params = {"limit": PAGE_SIZE, "page": page, **({"search": search} if search else {})}
+            data = self._client.request("GET", "/datasets", params=params)
+            pagination = data.get("pagination") if isinstance(data, dict) else None
+            if isinstance(data, dict):
+                data = data.get("datasets") or data.get("items") or []
+            items = [Dataset.from_json(item) for item in data or []]
+            fresh = [item for item in items if item.id not in seen]
+            # A server that ignores ``page`` answers with the first page again.
+            if not fresh:
+                break
+            seen.update(item.id for item in fresh)
+            found.extend(fresh)
+            pages = (pagination or {}).get("pages")
+            if (pages is not None and page >= pages) or (pages is None and len(items) < PAGE_SIZE):
+                break
+        return found
 
-    def get(self, ref: str | dict[str, Any]) -> dict[str, Any]:
+    def get(self, ref: str | Dataset) -> Dataset:
         """A dataset by id, or by name (case-insensitive)."""
-        if isinstance(ref, dict):
+        if isinstance(ref, Dataset):
             return ref
         if _OBJECT_ID.match(ref):
-            return dict(self._client.request("GET", f"/datasets/{quote(ref, safe='')}") or {})
+            try:
+                found = self._client.request("GET", f"/datasets/{quote(ref, safe='')}")
+                return Dataset.from_json(found or {})
+            except ApiError as exc:
+                # A name can look like an id; only a 404 means it was not one.
+                if exc.status != 404:
+                    raise
         datasets = self.list()
         for dataset in datasets:
-            if str(dataset.get("name", "")).lower() == ref.lower():
+            if dataset.name.lower() == ref.lower():
                 return dataset
-        names = sorted(str(d.get("name")) for d in datasets)
+        names = sorted(d.name for d in datasets)
         raise VisinError(f"no dataset named {ref!r}; available: {', '.join(names) or 'none'}")
 
     # ---------------------------------------------------------------- downloading
 
     def download(
-        self, ref: str | dict[str, Any], directory: str | Path | None = None, *, quiet: bool = False
+        self, ref: str | Dataset, directory: str | Path | None = None, *, quiet: bool = False
     ) -> Path:
         """The dataset's folder on disk, downloaded and unpacked the first time.
 
-        ``ref`` is a name, an id or a dataset from ``list()``. Returns the folder
+        ``ref`` is a name, an id or a :class:`~visin.models.Dataset` from ``list()``. Returns the folder
         holding the dataset: the zip's single top-level folder when it has one.
         """
         dataset = self.get(ref)
-        dataset_id = str(dataset.get("_id") or dataset.get("id") or "")
-        archive = dataset.get("archive") or {}
-        if not dataset_id or not archive:
-            raise VisinError(f"dataset {dataset.get('name', ref)!r} has no zip to download")
-        size = archive.get("size")
+        dataset_id = dataset.id
+        if not dataset.downloadable:
+            raise VisinError(f"dataset {dataset.name or ref!r} has no zip to download")
+        size = dataset.size
         base = Path(directory).expanduser() if directory else self.directory
-        target = base / f"{_slug(str(dataset.get('name') or dataset_id))}-{dataset_id}"
+        target = base / f"{_slug(dataset.name or dataset_id)}-{dataset_id}"
 
         if _complete(target, size):
             return _dataset_root(target)
@@ -119,9 +142,7 @@ class Datasets:
         signed = self._client.request("GET", f"/datasets/{quote(dataset_id, safe='')}/download") or {}
         zip_path = base / f"{dataset_id}-{signed.get('filename') or 'dataset.zip'}"
         if not quiet:
-            logger.info(
-                "visin: downloading dataset %s (%s) to %s", dataset.get("name"), _gigabytes(size), base
-            )
+            logger.info("visin: downloading dataset %s (%s) to %s", dataset.name, _gigabytes(size), base)
         self._client.download_file(
             signed["downloadUrl"], str(zip_path), size=size, progress=None if quiet else _Progress(size)
         )
@@ -132,7 +153,7 @@ class Datasets:
         shutil.rmtree(target, ignore_errors=True)
         unpacking.rename(target)
         (target / MARKER).write_text(
-            json.dumps({"id": dataset_id, "name": dataset.get("name"), "size": size, "file": zip_path.name})
+            json.dumps({"id": dataset_id, "name": dataset.name, "size": size, "file": zip_path.name})
         )
         zip_path.unlink()
         return _dataset_root(target)

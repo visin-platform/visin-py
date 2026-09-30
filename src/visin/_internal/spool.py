@@ -21,6 +21,7 @@ config, the two writes the server cannot recognise as repeats.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -128,10 +129,8 @@ class Spool:
 
     def tidy(self) -> None:
         """Remove the files directory once nothing in it is still needed."""
-        try:
+        with contextlib.suppress(OSError):
             self.files.rmdir()
-        except OSError:
-            pass
 
 
 def _count_lines(path: Path) -> int:
@@ -234,10 +233,8 @@ def _sync_batch(
     if kept:
         return
     batch.unlink()
-    try:
+    with contextlib.suppress(FileNotFoundError):
         _done_path(batch).unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _send_lines(

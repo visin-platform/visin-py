@@ -44,7 +44,7 @@ The package's layout, and the reasoning behind its main decisions, are in
 
 ## Writing a change
 
-- **Keep the loop safe.** Nothing in `Run` may raise into a training loop unless `strict=True` is
+- **Keep the loop safe.** Nothing in `Run` may raise into a training loop (starting a run aside) unless `strict=True` is
   set. Report problems through `_handle`.
 - **New request fields** must exist in Visin's API. The contract test fails on a field the server
   would strip.

@@ -28,13 +28,15 @@ tests/
 │                         argument checking, creating and attaching, finishing, crashes and
 │                         SIGTERM in a real subprocess, losing the server mid-run and catching up
 ├── test_offline.py       offline mode end to end: a run written to disk, then visin.sync()
-├── test_api.py           Api: paging, finding runs, epochs, test results, benchmarks, DataFrames
+├── test_api.py           Api and the models it returns: paging, finding runs, epochs, test results, DataFrames
 ├── test_system.py        system_info() and system_metrics(): nvidia-smi, PyTorch, psutil, /proc
 ├── test_cli.py           the visin command: check, sync, runs, version
 │
 ├── internal/             visin._internal, one file per module
-│   ├── test_config.py    environment variables, their older spellings, modes, overrides
+│   ├── test_config.py    environment variables, modes, overrides
 │   ├── test_transport.py which failures are retried for which requests, errors, uploads
+│   ├── test_inputs.py    epoch numbers, merging train/val, the shapes a config comes in
+│   ├── test_process.py   rank variables, and the crash and SIGTERM hooks
 │   ├── test_serialize.py NumPy, tensors, NaN and other values into JSON
 │   ├── test_sender.py    the background thread: order, failures, a full queue, flush
 │   ├── test_reports.py   delivering each kind of report, and repeats counted as delivered

@@ -16,12 +16,10 @@ from typing import Any
 
 from ..errors import ConfigurationError
 
-# The first name of each is the one Visin's documentation uses. The others are
-# what earlier drafts of this package read, and scripts already export them.
-ENV_URL = ("VISIN_URL", "VISIN_API_URL")
-ENV_TOKEN = ("VISIN_TOKEN", "VISIN_API_TOKEN")
+ENV_URL = ("VISIN_URL",)
+ENV_TOKEN = ("VISIN_TOKEN",)
 ENV_TRAINING_UUID = ("VISIN_TRAINING_UUID",)
-ENV_PROJECT = ("VISIN_PROJECT", "VISIN_PROJECT_ID")
+ENV_PROJECT = ("VISIN_PROJECT",)
 ENV_VERIFY = "VISIN_VERIFY_SSL"
 ENV_MODE = "VISIN_MODE"
 ENV_DIR = "VISIN_DIR"

@@ -40,7 +40,7 @@ def _learning_rate(model: Any) -> float | None:
         if callable(rate):  # a schedule
             rate = rate(model.optimizer.iterations)
         return float(to_jsonable(rate))
-    except Exception:  # noqa: BLE001 - an exotic optimizer is not worth an epoch
+    except Exception:
         return None
 
 

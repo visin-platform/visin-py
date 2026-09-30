@@ -1,7 +1,8 @@
 # Errors
 
-Nothing raises into a training loop by default. These are what a `strict=True` run raises, and what
-`Api` and `sync` raise.
+A run raises only when it starts (Visin refuses the run, or there is nothing to attach to) and once
+it is going, nothing raises into a training loop unless `strict=True`. These are what those raise,
+and what `Api` and `sync` raise.
 
 ::: visin.errors
     options:

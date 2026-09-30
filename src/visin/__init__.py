@@ -17,28 +17,35 @@ from ._version import __version__
 from .api import Api, flatten
 from .datasets import Datasets
 from .errors import ApiError, ConfigurationError, TransportError, VisinError
+from .models import Benchmark, Dataset, Epoch, Project, TestResult, Training
 from .offline import SyncResult, pending, sync
 from .run import Run, epoch_uuid_for, init
 from .system import system_info, system_metrics
 
 __all__ = [
-    "init",
-    "Run",
     "Api",
+    "ApiError",
+    "Benchmark",
+    "ConfigurationError",
+    "Dataset",
     "Datasets",
-    "sync",
-    "pending",
+    "Epoch",
+    "Project",
+    "Run",
+    "Settings",
     "SyncResult",
+    "TestResult",
+    "Training",
+    "TransportError",
+    "VisinError",
+    "__version__",
+    "enable_console_logging",
     "epoch_uuid_for",
     "flatten",
+    "init",
+    "pending",
+    "read_settings",
+    "sync",
     "system_info",
     "system_metrics",
-    "enable_console_logging",
-    "Settings",
-    "read_settings",
-    "VisinError",
-    "ApiError",
-    "TransportError",
-    "ConfigurationError",
-    "__version__",
 ]

@@ -49,14 +49,14 @@ def test_a_dataset_service_address_is_needed():
 
 
 def test_datasets_are_listed(datasets, session):
-    assert [d["name"] for d in datasets.list()] == ["ZOD"]
+    assert [d.name for d in datasets.list()] == ["ZOD"]
     assert session.calls[0]["url"] == f"{BASE}/api/datasets"
 
 
 def test_a_dataset_is_found_by_name_or_id(datasets, session):
     session.route("GET", f"/datasets/{ZOD_ID}", ok(zod()))
-    assert datasets.get("zod")["_id"] == ZOD_ID
-    assert datasets.get(ZOD_ID)["name"] == "ZOD"
+    assert datasets.get("zod").id == ZOD_ID
+    assert datasets.get(ZOD_ID).name == "ZOD"
 
 
 def test_an_unknown_name_lists_what_there_is(datasets):
@@ -126,3 +126,20 @@ def test_cli_lists_and_downloads(datasets, session, capsys, tmp_path):
 def test_cli_names_an_unknown_dataset(datasets, capsys):
     assert main(["download", "waymo"]) == 1
     assert "no dataset named 'waymo'" in capsys.readouterr().err
+
+
+def test_every_page_of_datasets_is_listed(datasets, session, monkeypatch):
+    monkeypatch.setattr("visin.datasets.PAGE_SIZE", 1)
+    other = {"_id": "7bbd9ac1f900dcbe46605bb0", "name": "Other"}
+    pages = {"pagination": {"pages": 2}}
+    session.routes[("GET", "/datasets")] = [
+        ok({"datasets": [zod()], **pages}),
+        ok({"datasets": [other], **pages}),
+    ]
+    assert [d.name for d in datasets.list()] == ["ZOD", "Other"]
+
+
+def test_a_server_ignoring_page_does_not_loop(datasets, session, monkeypatch):
+    monkeypatch.setattr("visin.datasets.PAGE_SIZE", 1)
+    session.routes[("GET", "/datasets")] = [ok([zod()]), ok([zod()])]
+    assert len(datasets.list()) == 1

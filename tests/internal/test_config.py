@@ -16,18 +16,12 @@ def test_the_documented_names_are_read(monkeypatch):
     assert settings.effective_mode == "online"
 
 
-def test_the_older_spellings_still_work(monkeypatch):
+def test_the_older_spellings_are_gone(monkeypatch):
     monkeypatch.setenv("VISIN_API_URL", "https://old.test")
     monkeypatch.setenv("VISIN_API_TOKEN", "t")
     monkeypatch.setenv("VISIN_PROJECT_ID", "p")
     settings = read_settings()
-    assert (settings.url, settings.token, settings.project) == ("https://old.test", "t", "p")
-
-
-def test_the_documented_name_wins(monkeypatch):
-    monkeypatch.setenv("VISIN_URL", "https://new.test")
-    monkeypatch.setenv("VISIN_API_URL", "https://old.test")
-    assert read_settings().url == "https://new.test"
+    assert (settings.url, settings.token, settings.project) == (None, None, None)
 
 
 def test_blank_values_count_as_unset(monkeypatch):

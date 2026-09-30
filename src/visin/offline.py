@@ -15,7 +15,7 @@ from ._internal.spool import Spool, SyncResult, pending_runs, sync_spool
 from ._internal.transport import HttpClient
 from .errors import ConfigurationError
 
-__all__ = ["sync", "pending", "SyncResult"]
+__all__ = ["SyncResult", "pending", "sync"]
 
 
 def pending(directory: Path | str | None = None) -> dict[str, int]:

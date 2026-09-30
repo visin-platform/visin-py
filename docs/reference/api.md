@@ -3,3 +3,5 @@
 ::: visin.api.Api
 
 ::: visin.api.flatten
+
+::: visin.models

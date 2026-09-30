@@ -25,7 +25,7 @@ def spool(tmp_path):
 
 
 def delivered(session, fragment):
-    return [body["epoch"] if "epoch" in body else body for body in session.bodies(fragment)]
+    return [body.get("epoch", body) for body in session.bodies(fragment)]
 
 
 # ---------------------------------------------------------------- the file

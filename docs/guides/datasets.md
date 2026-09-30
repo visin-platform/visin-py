@@ -16,7 +16,7 @@ from visin import Datasets
 
 with Datasets() as datasets:
     for dataset in datasets.list():
-        print(dataset["name"], dataset["archive"]["size"])
+        print(dataset.name, dataset.size)
     root = datasets.download("zod")  # a pathlib.Path
 ```
 

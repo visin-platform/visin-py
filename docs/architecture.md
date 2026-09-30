@@ -10,6 +10,8 @@ src/visin/
 ├── __init__.py          the public API: everything a user imports comes from here
 ├── run.py               Run and init: everything a training script writes
 ├── api.py               Api: reading runs back
+├── models.py            Training, Epoch, TestResult, Benchmark, Project, Dataset: what Api returns
+├── datasets.py          Datasets: list and download
 ├── offline.py           sync() and pending(): sending reports kept on disk
 ├── system.py            system_info() and system_metrics()
 ├── errors.py            VisinError and its subclasses
@@ -20,6 +22,8 @@ src/visin/
 │   └── _metrics.py      sorting flat metric names into train/val/test
 ├── _internal/           machinery; not public, may change in any release
 │   ├── config.py        settings from the environment and arguments
+│   ├── inputs.py        epoch numbers, results and configs in the shapes callers pass them
+│   ├── process.py       the process's rank, and learning how it ended (crash, SIGTERM)
 │   ├── transport.py     HTTP: retries, response unwrapping, signed uploads
 │   ├── serialize.py     NumPy/tensors/NaN into JSON Visin accepts
 │   ├── reports.py       what each kind of report is, and how it is delivered
@@ -56,7 +60,13 @@ path for sending.
 ## Decisions worth knowing
 
 **Nothing raises into the training loop.** A metrics backend is not worth a training job. Failures
-are logged and counted, and `finish` summarises them. `strict=True` exists for tests.
+are logged and counted, and `finish` summarises them. `strict=True` exists for tests. The one
+exception is starting a run: a refusal there (bad token, wrong project) raises, because every report
+after it would fail the same way and the person launching the job is there to read it.
+
+**Creating and attaching are separate.** `init` always registers a run, resuming it when its UUID is
+known; `Run.attach` reports into one that exists. Which one you get never depends on whether you
+passed a name.
 
 **Retries depend on the request, not on its method.** `transport.py` retries on its own terms
 instead of leaving it to urllib3, because a POST is only safe to repeat if it carries its own id.

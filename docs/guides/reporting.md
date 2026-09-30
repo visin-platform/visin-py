@@ -159,8 +159,13 @@ job, is turned into an ordinary exit so this still happens. If your framework al
 
 ## When things go wrong
 
-Nothing here raises into your loop. A report that fails is logged as a warning, and `finish` prints
-a summary. It reads like this:
+Two things raise, both at startup, where you are there to read them: `init` raises `ApiError` when
+Visin refuses the run outright (a bad token, a project the key does not cover), and `Run.attach`
+raises `ConfigurationError` when it has no run to attach to. Visin being unreachable does not raise;
+reports wait on disk.
+
+After that nothing raises into your loop. A report that fails is logged as a warning, and `finish`
+prints a summary. It reads like this:
 
 ```text
 visin: run 5f0c… completed: 118 reports sent, 2 failed, 0 dropped, 0 waiting on disk

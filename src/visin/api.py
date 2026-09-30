@@ -8,13 +8,12 @@ keys**); a pipeline key works too, for its one project.
 
     api = Api()                        # VISIN_URL and VISIN_TOKEN
     for run in api.trainings(project="road-seg", status="completed"):
-        print(run["name"])
+        print(run.name, run.status)
     frame = api.epochs_frame(run)      # one row per epoch, needs pandas
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 from urllib.parse import quote
@@ -22,11 +21,20 @@ from urllib.parse import quote
 from ._internal.config import read_settings
 from ._internal.transport import HttpClient
 from .errors import ConfigurationError
-
-_OBJECT_ID = re.compile(r"^[0-9a-fA-F]{24}$")
+from .models import Benchmark, Epoch, Project, TestResult, Training
 
 # The server's cap on one page.
 MAX_PAGE_SIZE = 1000
+
+# Sort keys are Python names here; the server spells them its own way.
+_SORT_KEYS = {
+    "updated_at": "updatedAt",
+    "created_at": "createdAt",
+    "start_time": "startTime",
+    "end_time": "endTime",
+    "name": "name",
+    "status": "status",
+}
 
 
 def flatten(results: Mapping[str, Any], sep: str = ".", prefix: str = "") -> dict[str, Any]:
@@ -46,7 +54,12 @@ def flatten(results: Mapping[str, Any], sep: str = ".", prefix: str = "") -> dic
 
 
 class Api:
-    """A read client for one Visin instance."""
+    """A read client for one Visin instance.
+
+    Everything it returns is a model from :mod:`visin.models`. Anything a
+    method takes as a run accepts a :class:`~visin.models.Training` or a run's
+    UUID.
+    """
 
     def __init__(
         self,
@@ -64,6 +77,7 @@ class Api:
         self._client = client
 
     def close(self) -> None:
+        """Release the connection. ``with Api() as api`` does this for you."""
         self._client.close()
 
     def __enter__(self) -> Api:
@@ -72,8 +86,7 @@ class Api:
     def __exit__(self, *_exc: Any) -> None:
         self.close()
 
-    def get(self, path: str, **params: Any) -> Any:
-        """Any GET under ``/api``, unwrapped: for endpoints this class has no method for."""
+    def _get(self, path: str, **params: Any) -> Any:
         return self._client.request("GET", path, params={k: v for k, v in params.items() if v is not None})
 
     def _pages(
@@ -82,7 +95,7 @@ class Api:
         page = 1
         size = max(1, min(page_size, MAX_PAGE_SIZE))
         while True:
-            data = self.get(path, **params, page=page, limit=size) or {}
+            data = self._get(path, **params, page=page, limit=size) or {}
             items = data.get(key) or []
             yield from items
             pages = (data.get("pagination") or {}).get("pages")
@@ -92,12 +105,13 @@ class Api:
 
     # ---------------------------------------------------------------- projects
 
-    def projects(self, search: str | None = None) -> list[dict[str, Any]]:
+    def projects(self, search: str | None = None) -> list[Project]:
         """The projects this credential can see."""
-        return list(self.get("/projects", search=search) or [])
+        return [Project.from_json(item) for item in self._get("/projects", search=search) or []]
 
-    def project(self, id_or_slug: str) -> dict[str, Any]:
-        return dict(self.get(f"/projects/{quote(id_or_slug, safe='')}") or {})
+    def project(self, id_or_slug: str) -> Project:
+        """One project, by its id or slug."""
+        return Project.from_json(self._get(f"/projects/{quote(id_or_slug, safe='')}") or {})
 
     # ---------------------------------------------------------------- runs
 
@@ -109,22 +123,26 @@ class Api:
         tags: Iterable[str] | str | None = None,
         search: str | None = None,
         dataset: str | None = None,
-        sort_by: str = "updatedAt",
+        sort_by: str = "updated_at",
         order: str = "desc",
         limit: int | None = None,
         page_size: int = 100,
-    ) -> Iterator[dict[str, Any]]:
+    ) -> Iterator[Training]:
         """Runs, newest first, fetched a page at a time as you iterate.
 
-        ``limit`` stops after that many; without it, every matching run.
+        ``sort_by`` is one of ``updated_at``, ``created_at``, ``start_time``,
+        ``end_time``, ``name`` or ``status``. ``limit`` stops after that many;
+        without it, every matching run.
         """
+        if sort_by not in _SORT_KEYS:
+            raise ValueError(f"sort_by must be one of {', '.join(_SORT_KEYS)}, not {sort_by!r}")
         params = {
             "projectId": project,
             "status": status,
             "tags": tags if isinstance(tags, str) or tags is None else ",".join(tags),
             "search": search,
             "datasetId": dataset,
-            "sortBy": sort_by,
+            "sortBy": _SORT_KEYS[sort_by],
             "order": order,
         }
         params = {key: value for key, value in params.items() if value is not None}
@@ -133,51 +151,49 @@ class Api:
         for count, training in enumerate(self._pages("/trainings", "trainings", params, page_size)):
             if limit is not None and count >= limit:
                 return
-            yield training
+            yield Training.from_json(training)
 
-    def training(self, ref: str | Mapping[str, Any]) -> dict[str, Any]:
-        """One run, by its id, its UUID, or a run dict from :meth:`trainings`."""
-        if isinstance(ref, Mapping):
-            return dict(ref)
-        if _OBJECT_ID.match(ref):
-            return dict(self.get(f"/trainings/{ref}") or {})
-        return dict(self.get(f"/trainings/uuid/{quote(ref, safe='')}") or {})
+    def training(self, ref: str | Training) -> Training:
+        """One run, by its UUID, or a run you already have."""
+        if isinstance(ref, Training):
+            return ref
+        return Training.from_json(self._get(f"/trainings/uuid/{quote(ref, safe='')}") or {})
 
-    def _training_ids(self, ref: str | Mapping[str, Any]) -> tuple[str, str]:
-        training = (
-            ref if isinstance(ref, Mapping) and ref.get("_id") and ref.get("uuid") else self.training(ref)
-        )
-        return str(training["_id"]), str(training["uuid"])
-
-    def epochs(self, ref: str | Mapping[str, Any]) -> list[dict[str, Any]]:
+    def epochs(self, ref: str | Training) -> list[Epoch]:
         """Every epoch of a run, in epoch order."""
-        ident, _ = self._training_ids(ref)
-        return list(
-            self._pages(f"/epochs/training/{ident}", "epochs", {"sortBy": "epoch", "order": "asc"}, 1000)
+        training = self.training(ref)
+        pages = self._pages(
+            f"/epochs/training/{training.id}", "epochs", {"sortBy": "epoch", "order": "asc"}, 1000
         )
+        return [Epoch.from_json(item) for item in pages]
 
-    def test_results(self, ref: str | Mapping[str, Any]) -> list[dict[str, Any]]:
+    def test_results(self, ref: str | Training) -> list[TestResult]:
         """The run's test results, newest first."""
-        _, uuid = self._training_ids(ref)
-        return list(self._pages("/test-results", "testResults", {"training_uuid": uuid}, 500))
+        uuid = self._uuid(ref)
+        pages = self._pages("/test-results", "testResults", {"training_uuid": uuid}, 500)
+        return [TestResult.from_json(item) for item in pages]
 
     def benchmarks(
         self,
-        ref: str | Mapping[str, Any] | None = None,
+        ref: str | Training | None = None,
         *,
         project: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[Benchmark]:
         """Benchmarks of a run, or of a whole project, newest first."""
         params: dict[str, Any] = {}
         if ref is not None:
-            params["training_uuid"] = self._training_ids(ref)[1]
+            params["training_uuid"] = self._uuid(ref)
         if project is not None:
             params["projectId"] = project
-        return list(self._pages("/benchmarks", "benchmarks", params, 500))
+        return [Benchmark.from_json(item) for item in self._pages("/benchmarks", "benchmarks", params, 500)]
+
+    @staticmethod
+    def _uuid(ref: str | Training) -> str:
+        return ref.uuid if isinstance(ref, Training) else ref
 
     # ---------------------------------------------------------------- frames
 
-    def epochs_frame(self, ref: str | Mapping[str, Any], *, sep: str = ".") -> Any:
+    def epochs_frame(self, ref: str | Training, *, sep: str = ".") -> Any:
         """A run's epochs as a pandas DataFrame, one row per epoch.
 
         Results are flattened into columns (``val.loss``, ``val.car.iou``), and
@@ -191,14 +207,12 @@ class Api:
         rows = []
         for epoch in self.epochs(ref):
             row: dict[str, Any] = {
-                "epoch": epoch.get("epoch"),
-                "timestamp": epoch.get("timestamp"),
-                "learning_rate": epoch.get("learning_rate"),
-                "epoch_time": epoch.get("epoch_time"),
+                "epoch": epoch.epoch,
+                "timestamp": epoch.timestamp,
+                "learning_rate": epoch.learning_rate,
+                "epoch_time": epoch.epoch_time,
             }
-            results = epoch.get("results")
-            if isinstance(results, Mapping):
-                row.update(flatten(results, sep))
+            row.update(flatten(epoch.results, sep))
             rows.append(row)
         frame = pd.DataFrame(rows)
         if "timestamp" in frame:

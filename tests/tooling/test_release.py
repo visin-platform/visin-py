@@ -114,7 +114,9 @@ def test_the_real_changelog_can_be_released():
     text = (SCRIPT.parents[1] / "CHANGELOG.md").read_text()
     current = release.read_version()
     upcoming = release.next_version(current, [], "minor")
-    unreleased = re.search(r"^## \[Unreleased\]\n(.*?)(?=^## \[)", text, re.M | re.S).group(1).strip()
+    unreleased = (
+        re.search(r"^## \[Unreleased\]\n(.*?)(?=^## \[)", text, re.MULTILINE | re.DOTALL).group(1).strip()
+    )
     released = release.update_changelog(text, upcoming, current, {}, "2026-09-25")
     assert release.release_notes(released, upcoming).strip() == (unreleased or "No user-facing changes.")
     assert release.release_notes(released, current) == release.release_notes(text, current)

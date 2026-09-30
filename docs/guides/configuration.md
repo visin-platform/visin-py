@@ -15,9 +15,6 @@ Every setting can come from the environment, which keeps tokens out of code, or 
 | `VISIN_DATASET_URL` | `Datasets(url=)` | The dataset service's address, such as `https://dataset-api.example.com`. Datasets are served apart from runs. |
 | `VISIN_DATA_DIR` | `Datasets(directory=)` | Where downloaded datasets go. Default `~/.cache/visin/datasets` (`$XDG_CACHE_HOME/visin/datasets`). |
 
-`VISIN_API_URL`, `VISIN_API_TOKEN` and `VISIN_PROJECT_ID`, the names earlier versions used, are still
-read.
-
 There is no default server address. A script with none configured reports nothing, so it can never
 send runs to somebody else's Visin by accident.
 

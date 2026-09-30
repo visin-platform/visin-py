@@ -56,11 +56,11 @@ def test_unconfigured_env_yields_a_run_that_reports_nothing():
     run.finish()
 
 
-def test_configured_without_a_run_uuid_is_an_error(monkeypatch):
+def test_attaching_without_a_run_uuid_is_an_error(monkeypatch):
     monkeypatch.setenv("VISIN_URL", BASE)
     monkeypatch.setenv("VISIN_TOKEN", "t")
-    with pytest.raises(ConfigurationError):
-        Run.from_env()
+    with pytest.raises(ConfigurationError, match="VISIN_TRAINING_UUID"):
+        Run.attach()
 
 
 def test_only_rank_zero_reports(server, session, monkeypatch):
@@ -358,15 +358,12 @@ def test_a_resumed_run_is_marked_running_again(server, session, caplog):
     assert any("resumed run" in record.message for record in caplog.records)
 
 
-def test_a_refused_run_stops_reporting_instead_of_failing_every_epoch(server, session, caplog):
+def test_a_refused_run_raises_at_startup(server, session):
     session.route("POST", "/trainings", refused(403, "Access denied to project"))
-    with caplog.at_level(logging.WARNING, logger="visin"):
-        run = Run.create("wrong project")
-    assert run.mode == "disabled"
-    run.log_epoch(1, {"loss": 1})
-    run.finish()
+    with pytest.raises(ApiError, match="Access denied to project") as caught:
+        Run.create("wrong project")
+    assert caught.value.status == 403
     assert session.paths() == ["/trainings"]
-    assert any("Access denied to project" in record.message for record in caplog.records)
 
 
 def test_create_with_a_config_logs_it(server, session):
@@ -374,9 +371,9 @@ def test_create_with_a_config_logs_it(server, session):
     assert sent(session, "/configs/upload")[0]["config_data"] == {"lr": 1}
 
 
-def test_init_attaches_to_the_run_an_orchestrator_named(server, session, monkeypatch):
+def test_attach_reports_into_the_run_an_orchestrator_named(server, session, monkeypatch):
     monkeypatch.setenv("VISIN_TRAINING_UUID", "from-orchestrator")
-    run = visin.init()
+    run = Run.attach()
     run.log_epoch(1, {"loss": 1})
     run.flush()
     assert "/trainings" not in session.paths("POST")
@@ -451,27 +448,33 @@ def test_an_unknown_status_falls_back_to_completed(client, session):
 
 def test_context_manager_marks_a_crash_as_failed(client, session):
     session.route("GET", "/trainings/uuid/", ok({"_id": "t1"}))
-    with pytest.raises(RuntimeError):
+
+    def train():
         with make_run(client) as run:
             run.log_epoch(1, {"loss": 1.0})
             raise RuntimeError("diverged")
+
+    with pytest.raises(RuntimeError):
+        train()
     assert sent(session, "/trainings/t1", "PUT")[0]["status"] == "failed"
 
 
 def test_a_clean_sys_exit_is_not_a_failure(client, session):
     session.route("GET", "/trainings/uuid/", ok({"_id": "t1"}))
-    with pytest.raises(SystemExit):
-        with make_run(client):
-            raise SystemExit(0)
+    with pytest.raises(SystemExit), make_run(client):
+        raise SystemExit(0)
     assert sent(session, "/trainings/t1", "PUT")[0]["status"] == "completed"
 
 
 def test_epochs_logged_before_a_crash_are_still_sent(client, session):
-    with pytest.raises(RuntimeError):
+    def train():
         with make_run(client) as run:
             for epoch in range(3):
                 run.log_epoch(epoch, {"loss": 1.0 / (epoch + 1)})
             raise RuntimeError("OOM")
+
+    with pytest.raises(RuntimeError):
+        train()
     assert len(sent(session, "/epochs/upload")) == 3
 
 
@@ -486,7 +489,7 @@ def test_a_process_that_ends_without_finish_is_finished_at_exit(client, session,
 
 
 def test_a_process_that_crashed_is_marked_failed_at_exit(client, session, isolated, monkeypatch):
-    monkeypatch.setattr(visin.run._ProcessHooks, "crashed", True)
+    monkeypatch.setattr(visin._internal.process.ProcessHooks, "crashed", True)
     session.route("GET", "/trainings/uuid/", ok({"_id": "t1"}))
     make_run(client)
     for callback in list(isolated.callbacks):
@@ -496,7 +499,7 @@ def test_a_process_that_crashed_is_marked_failed_at_exit(client, session, isolat
 
 def test_sigterm_becomes_an_ordinary_exit():
     with pytest.raises(SystemExit) as caught:
-        visin.run._ProcessHooks._on_sigterm(15, None)
+        visin._internal.process.ProcessHooks._on_sigterm(15, None)
     assert caught.value.code == 143
 
 
@@ -637,9 +640,9 @@ def test_a_known_training_id_saves_the_lookup(client, session):
 # ---------------------------------------------------------------- constructors
 
 
-def test_from_env_reports_into_the_named_run(server, session, monkeypatch):
+def test_attach_defaults_to_the_named_run(server, session, monkeypatch):
     monkeypatch.setenv("VISIN_TRAINING_UUID", "named")
-    run = Run.from_env()
+    run = Run.attach()
     assert run.training_uuid == "named" and run.mode == "online"
     assert repr(run) == "<visin.Run named online>"
     run.finish()
@@ -648,7 +651,7 @@ def test_from_env_reports_into_the_named_run(server, session, monkeypatch):
 
 def test_constructors_without_a_server_are_disabled(monkeypatch):
     assert Run.attach("x").mode == "disabled"
-    assert Run.from_env().mode == "disabled"
+    assert Run.attach().mode == "disabled"
     assert repr(Run.disabled()) == "<visin.Run - disabled>"
 
 
@@ -656,7 +659,7 @@ def test_other_ranks_are_disabled_whichever_constructor(server, monkeypatch):
     monkeypatch.setenv("SLURM_PROCID", "3")
     monkeypatch.setenv("VISIN_TRAINING_UUID", "x")
     assert Run.attach("x").mode == "disabled"
-    assert Run.from_env().mode == "disabled"
+    assert Run.attach().mode == "disabled"
 
 
 def test_a_run_uuid_that_cannot_name_a_file_still_reports_online(server, session, tmp_path):
@@ -692,7 +695,7 @@ def test_strict_create_raises_a_refusal(server, session):
         Run.create("x", strict=True)
 
 
-def test_init_attaching_still_logs_its_config(server, session, monkeypatch):
+def test_init_resuming_still_logs_its_config(server, session, monkeypatch):
     monkeypatch.setenv("VISIN_TRAINING_UUID", "from-orchestrator")
     visin.init(config={"lr": 1}).flush()
     assert sent(session, "/configs/upload")[0]["config_data"] == {"lr": 1}
@@ -849,9 +852,8 @@ def test_a_script_that_does_not_own_the_run_leaves_its_status_alone(server, sess
 
 
 def test_a_crashing_script_that_does_not_own_the_run_does_not_fail_it(server, session):
-    with pytest.raises(RuntimeError):
-        with Run.attach("trained-earlier", mark_status=False):
-            raise RuntimeError("test set missing")
+    with pytest.raises(RuntimeError), Run.attach("trained-earlier", mark_status=False):
+        raise RuntimeError("test set missing")
     assert session.paths("PUT") == []
 
 
@@ -951,17 +953,13 @@ def test_console_logging_prints_visins_lines_once(capsys):
 
 
 def test_a_terminated_run_says_so(client, session, caplog, monkeypatch):
-    monkeypatch.setattr(visin.run._ProcessHooks, "terminated", True)
-    with caplog.at_level(logging.WARNING, logger="visin"):
-        with pytest.raises(SystemExit):
-            with make_run(client):
-                raise SystemExit(143)
+    monkeypatch.setattr(visin._internal.process.ProcessHooks, "terminated", True)
+    with caplog.at_level(logging.WARNING, logger="visin"), pytest.raises(SystemExit), make_run(client):
+        raise SystemExit(143)
     assert any("terminated by SIGTERM" in record.message for record in caplog.records)
 
 
 def test_a_nonzero_exit_names_its_status(client, session, caplog):
-    with caplog.at_level(logging.WARNING, logger="visin"):
-        with pytest.raises(SystemExit):
-            with make_run(client):
-                raise SystemExit(2)
+    with caplog.at_level(logging.WARNING, logger="visin"), pytest.raises(SystemExit), make_run(client):
+        raise SystemExit(2)
     assert any("exited with status 2" in record.message for record in caplog.records)

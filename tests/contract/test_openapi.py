@@ -122,11 +122,11 @@ def recorded(server, session, uploads, tmp_path, monkeypatch):
     list(
         api.trainings(project="road-seg", status="completed", tags=["x"], search="s", dataset="zod", limit=1)
     )
-    api.training("0123456789abcdef01234567")
+    run = visin.Training(id="0123456789abcdef01234567", uuid="u", name="n")
     api.training("some-uuid")
-    api.epochs({"_id": "0123456789abcdef01234567", "uuid": "u"})
-    api.test_results({"_id": "0123456789abcdef01234567", "uuid": "u"})
-    api.benchmarks({"_id": "0123456789abcdef01234567", "uuid": "u"}, project="p")
+    api.epochs(run)
+    api.test_results(run)
+    api.benchmarks(run, project="p")
     api.projects()
     api.project("road-seg")
 
@@ -158,8 +158,10 @@ def test_every_body_satisfies_its_schema_and_sends_nothing_the_server_would_stri
         if schema is None:
             continue
         checked.add(f"{call['method']} {template}")
-        for error in jsonschema.Draft202012Validator(schema).iter_errors(call["json"]):
-            problems.append(f"{call['method']} {template}: {error.message}")
+        validator = jsonschema.Draft202012Validator(schema)
+        problems.extend(
+            f"{call['method']} {template}: {error.message}" for error in validator.iter_errors(call["json"])
+        )
         known = set(schema.get("properties", {}))
         extra = set(call["json"]) - known
         if known and extra:
