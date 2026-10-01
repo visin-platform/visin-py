@@ -46,3 +46,29 @@ downloads start at the bytes already on disk. Updates are throttled to five per
 second; redirected output retains periodic log lines. Extraction is announced
 after the download finishes. Pass `quiet=True` to `Datasets.download()` to hide
 download progress.
+
+
+## Choose whether to extract and retain the archive
+
+```bash
+visin download zod                 # extract and delete the ZIP (default)
+visin download zod --keep-archive   # extract and retain the ZIP
+visin download zod --no-unzip       # download only; print the ZIP path
+```
+
+The Python options are keyword-only:
+
+```python
+with Datasets() as datasets:
+    folder = datasets.download("zod", keep_archive=True)
+    archive = datasets.download("waymo", unzip=False)
+```
+
+`unzip=True` and `keep_archive=False` preserve the default behavior. With
+`unzip=False`, the returned path points to the ZIP, which is always kept;
+`keep_archive` has no effect. Completed ZIPs are reused when their size matches
+the dataset metadata, including when retrying a failed extraction. Requesting
+`keep_archive=True` for an already extracted dataset fetches a missing archive
+without extracting the dataset again. The ZIP is deleted only after successful
+extraction; a cleanup failure logs a warning and still returns the dataset folder.
+Fusion's `visin:` dataset roots continue to use automatic extraction.

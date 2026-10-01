@@ -121,12 +121,20 @@ class Datasets:
     # ---------------------------------------------------------------- downloading
 
     def download(
-        self, ref: str | Dataset, directory: str | Path | None = None, *, quiet: bool = False
+        self,
+        ref: str | Dataset,
+        directory: str | Path | None = None,
+        *,
+        quiet: bool = False,
+        unzip: bool = True,
+        keep_archive: bool = False,
     ) -> Path:
         """The dataset's folder on disk, downloaded and unpacked the first time.
 
         ``ref`` is a name, an id or a :class:`~visin.models.Dataset` from ``list()``. Returns the folder
         holding the dataset: the zip's single top-level folder when it has one.
+        With ``unzip=False``, return the downloaded ZIP path instead and always retain it.
+        With ``keep_archive=True``, retain the ZIP alongside the extracted dataset.
         """
         dataset = self.get(ref)
         dataset_id = dataset.id
@@ -136,24 +144,31 @@ class Datasets:
         base = Path(directory).expanduser() if directory else self.directory
         target = base / f"{_slug(dataset.name or dataset_id)}-{dataset_id}"
 
-        if _complete(target, size):
+        extracted = _complete(target, size)
+        if extracted and unzip and not keep_archive:
             return _dataset_root(target)
 
         base.mkdir(parents=True, exist_ok=True)
         # A fresh signed URL each time: they expire, and a resumed download needs a live one
         signed = self._client.request("GET", f"/datasets/{quote(dataset_id, safe='')}/download") or {}
         zip_path = base / f"{dataset_id}-{signed.get('filename') or 'dataset.zip'}"
-        if not quiet:
-            logger.info("visin: downloading dataset %s (%s) to %s", dataset.name, _gigabytes(size), base)
-        progress = None if quiet else _Progress(size)
-        if progress is not None:
-            part = Path(str(zip_path) + ".part")
-            progress(part.stat().st_size if part.exists() else 0, size)
-        try:
-            self._client.download_file(signed["downloadUrl"], str(zip_path), size=size, progress=progress)
-        finally:
+        if not zip_path.is_file() or (size is not None and zip_path.stat().st_size != size):
+            if not quiet:
+                logger.info("visin: downloading dataset %s (%s) to %s", dataset.name, _gigabytes(size), base)
+            progress = None if quiet else _Progress(size)
             if progress is not None:
-                progress.close()
+                part = Path(str(zip_path) + ".part")
+                progress(part.stat().st_size if part.exists() else 0, size)
+            try:
+                self._client.download_file(signed["downloadUrl"], str(zip_path), size=size, progress=progress)
+            finally:
+                if progress is not None:
+                    progress.close()
+
+        if not unzip:
+            return zip_path
+        if extracted:
+            return _dataset_root(target)
         if not quiet:
             logger.info("visin: extracting %s...", dataset.name)
 
@@ -165,7 +180,11 @@ class Datasets:
         (target / MARKER).write_text(
             json.dumps({"id": dataset_id, "name": dataset.name, "size": size, "file": zip_path.name})
         )
-        zip_path.unlink()
+        if not keep_archive:
+            try:
+                zip_path.unlink()
+            except OSError as exc:
+                logger.warning("visin: dataset extracted, but could not delete archive %s: %s", zip_path, exc)
         return _dataset_root(target)
 
 

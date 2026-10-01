@@ -255,7 +255,7 @@ def cmd_download(args: argparse.Namespace) -> int:
     logging.getLogger("visin").setLevel(logging.INFO)  # show the progress
     try:
         with Datasets(args.url, args.token, directory=args.dir) as datasets:
-            root = datasets.download(args.dataset)
+            root = datasets.download(args.dataset, unzip=not args.no_unzip, keep_archive=args.keep_archive)
     except VisinError as exc:
         print(f"visin download: {exc}", file=sys.stderr)
         return 1
@@ -318,6 +318,10 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_server(download)
     download.add_argument("dataset", help="its name (e.g. zod) or id")
     download.add_argument("--dir", help="where datasets go (default: VISIN_DATA_DIR)")
+    download.add_argument(
+        "--no-unzip", action="store_true", help="keep the ZIP without extracting; print its path"
+    )
+    download.add_argument("--keep-archive", action="store_true", help="retain the ZIP after extraction")
     download.set_defaults(handler=cmd_download)
 
     version = commands.add_parser("version", help="print the version")

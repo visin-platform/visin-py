@@ -37,7 +37,7 @@ def datasets(monkeypatch, client, session, uploads, tmp_path):
     monkeypatch.setenv("VISIN_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setattr("visin.datasets.HttpClient", lambda *_args, **_kwargs: client)
     signed = {"downloadUrl": SIGNED, "filename": "zod_dataset.zip"}
-    session.route("GET", f"/datasets/{ZOD_ID}/download", ok(signed))
+    session.route("GET", f"/datasets/{ZOD_ID}/download", ok(signed), ok(signed))
     session.route("GET", "/datasets", ok([zod()]))
     uploads.files[SIGNED] = ARCHIVE
     return Datasets()
@@ -244,3 +244,98 @@ def test_progress_fits_an_eighty_column_terminal(monkeypatch):
     assert len(line) < 80
     assert "10.0%" in line and "1.00 GiB / 10.00 GiB" in line
     assert "ETA" in line
+
+
+@pytest.mark.parametrize(
+    ("unzip", "keep_archive"), [(True, False), (True, True), (False, False), (False, True)]
+)
+def test_download_options_control_extraction_retention_and_return_path(
+    datasets, tmp_path, unzip, keep_archive
+):
+    result = datasets.download("zod", unzip=unzip, keep_archive=keep_archive)
+    archive = tmp_path / "data" / f"{ZOD_ID}-zod_dataset.zip"
+    extracted = tmp_path / "data" / f"zod-{ZOD_ID}"
+    assert archive.exists() == (keep_archive or not unzip)
+    assert extracted.exists() == unzip
+    if unzip:
+        assert (result / "train.txt").is_file()
+    else:
+        assert result == archive
+        assert result.read_bytes() == ARCHIVE
+
+
+def test_a_zip_only_download_can_later_be_extracted_without_downloading_again(datasets, session, uploads):
+    archive = datasets.download("zod", unzip=False)
+    session.route("GET", "/datasets", ok([zod()]))
+    result = datasets.download("zod")
+    assert (result / "train.txt").is_file()
+    assert not archive.exists()
+    assert len(uploads.gets) == 1
+
+
+def test_a_repeated_zip_only_download_reuses_the_archive(datasets, session, uploads):
+    first = datasets.download("zod", unzip=False)
+    session.route("GET", "/datasets", ok([zod()]))
+    assert datasets.download("zod", unzip=False) == first
+    assert len(uploads.gets) == 1
+
+
+def test_keep_archive_fetches_a_missing_zip_without_extracting_again(datasets, session, uploads, monkeypatch):
+    first = datasets.download("zod")
+    session.route("GET", "/datasets", ok([zod()]))
+
+    def unexpected_extraction(*_args):
+        pytest.fail("completed dataset should not be extracted again")
+
+    monkeypatch.setattr("visin.datasets._unzip", unexpected_extraction)
+    assert datasets.download("zod", keep_archive=True) == first
+    assert len(uploads.gets) == 2
+    assert list(datasets.directory.glob("*.zip"))
+
+
+def test_failed_extraction_reuses_the_completed_archive_on_retry(datasets, session, uploads, monkeypatch):
+    from visin.datasets import _unzip
+
+    def interrupted(*_args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("visin.datasets._unzip", interrupted)
+    with pytest.raises(OSError, match="disk full"):
+        datasets.download("zod")
+    assert list(datasets.directory.glob("*.zip"))
+    session.route("GET", "/datasets", ok([zod()]))
+    monkeypatch.setattr("visin.datasets._unzip", _unzip)
+    assert (datasets.download("zod") / "train.txt").is_file()
+    assert len(uploads.gets) == 1
+
+
+def test_an_archive_with_the_wrong_size_is_downloaded_again(datasets, tmp_path, uploads):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / f"{ZOD_ID}-zod_dataset.zip").write_bytes(b"incomplete")
+    result = datasets.download("zod", unzip=False)
+    assert result.read_bytes() == ARCHIVE
+    assert len(uploads.gets) == 1
+
+
+def test_archive_cleanup_failure_does_not_fail_a_completed_dataset(datasets, monkeypatch, caplog):
+    from pathlib import Path
+
+    unlink = Path.unlink
+
+    def fail_zip_delete(path, *args, **kwargs):
+        if path.suffix == ".zip":
+            raise PermissionError("archive is read-only")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_zip_delete)
+    assert (datasets.download("zod") / "train.txt").is_file()
+    assert "could not delete archive" in caplog.text
+
+
+@pytest.mark.parametrize(("flags", "zip_only"), [(["--no-unzip"], True), (["--keep-archive"], False)])
+def test_cli_download_options(datasets, capsys, flags, zip_only):
+    assert main(["download", "zod", *flags]) == 0
+    output = capsys.readouterr().out.strip()
+    assert output.endswith(".zip") == zip_only
+    assert list(datasets.directory.glob("*.zip"))
+    assert bool(list(datasets.directory.glob(f"zod-{ZOD_ID}"))) != zip_only
