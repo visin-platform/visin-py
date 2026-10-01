@@ -10,18 +10,25 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-01
+
+### Added
+
+- add dataset download progress bar
+
 ### Changed
 
 - Dataset downloads show a single-line terminal progress bar with percentage, transferred size,
   speed and estimated time remaining, including the starting offset of resumed downloads.
 
+[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/visin-platform/visin-py/compare/v0.3.0...v0.4.0
 ## [0.3.0] - 2026-09-30
 
 ### Added
 
 - return typed models, separate create from attach, raise on refused startup
 
-[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/visin-platform/visin-py/compare/v0.2.1...v0.3.0
 ## [0.2.1] - 2026-09-27
 
