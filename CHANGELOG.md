@@ -10,6 +10,11 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+### Changed
+
+- Dataset downloads show a single-line terminal progress bar with percentage, transferred size,
+  speed and estimated time remaining, including the starting offset of resumed downloads.
+
 ## [0.3.0] - 2026-09-30
 
 ### Added

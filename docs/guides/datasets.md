@@ -39,3 +39,10 @@ folder itself.
 
 The data directory is `VISIN_DATA_DIR`, else `~/.cache/visin/datasets`. On a cluster, point it at
 scratch space: home quotas rarely fit a dataset.
+
+In a terminal, downloads show a single-line progress bar with percentage,
+downloaded/total size, transfer speed and estimated time remaining. Resumed
+downloads start at the bytes already on disk. Updates are throttled to five per
+second; redirected output retains periodic log lines. Extraction is announced
+after the download finishes. Pass `quiet=True` to `Datasets.download()` to hide
+download progress.

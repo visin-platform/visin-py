@@ -22,6 +22,8 @@ import json
 import logging
 import re
 import shutil
+import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -143,9 +145,17 @@ class Datasets:
         zip_path = base / f"{dataset_id}-{signed.get('filename') or 'dataset.zip'}"
         if not quiet:
             logger.info("visin: downloading dataset %s (%s) to %s", dataset.name, _gigabytes(size), base)
-        self._client.download_file(
-            signed["downloadUrl"], str(zip_path), size=size, progress=None if quiet else _Progress(size)
-        )
+        progress = None if quiet else _Progress(size)
+        if progress is not None:
+            part = Path(str(zip_path) + ".part")
+            progress(part.stat().st_size if part.exists() else 0, size)
+        try:
+            self._client.download_file(signed["downloadUrl"], str(zip_path), size=size, progress=progress)
+        finally:
+            if progress is not None:
+                progress.close()
+        if not quiet:
+            logger.info("visin: extracting %s...", dataset.name)
 
         unpacking = target.with_name(target.name + ".unpacking")
         shutil.rmtree(unpacking, ignore_errors=True)
@@ -198,17 +208,69 @@ def _dataset_root(target: Path) -> Path:
     return target
 
 
+def _bytes(value: int | float) -> str:
+    for unit, scale in (("GiB", 2**30), ("MiB", 2**20), ("KiB", 2**10)):
+        if value >= scale:
+            return f"{value / scale:.2f} {unit}"
+    return f"{value:.0f} B"
+
+
 class _Progress:
-    """Logs every 5% of a download."""
+    """Refresh one terminal line; retain sparse log messages for redirected output."""
 
     def __init__(self, total: int | None):
         self.total = total
         self.next = 0.0
+        self.stream = sys.stderr
+        self.terminal = self.stream.isatty()
+        self.started = time.monotonic()
+        self.last_update: float | None = None
+        self.initial: int | None = None
+        self.width = 0
 
     def __call__(self, done: int, total: int | None) -> None:
         total = total or self.total
-        if not total:
+        now = time.monotonic()
+        if self.initial is None or done < self.initial:
+            self.initial = done
+            self.started = now
+        if not self.terminal:
+            if total and done / total >= self.next:
+                logger.info("visin: %.1f / %.1f GB", done / 2**30, total / 2**30)
+                self.next = done / total + 0.05
             return
-        if done / total >= self.next:
-            logger.info("visin: %.1f / %.1f GB", done / 2**30, total / 2**30)
-            self.next = done / total + 0.05
+        if self.last_update is not None and now - self.last_update < 0.2 and not (total and done >= total):
+            return
+        self.last_update = now
+        elapsed = now - self.started
+        speed = max(0, done - self.initial) / elapsed if elapsed > 0 else 0
+        if total:
+            fraction = min(1.0, max(0.0, done / total))
+            details = f" {fraction:6.1%}  {_bytes(done)} / {_bytes(total)}"
+            if speed > 0:
+                remaining = int(max(0, total - done) / speed)
+                minutes, seconds = divmod(remaining, 60)
+                details += f"  {_bytes(speed)}/s  ETA {minutes:02d}:{seconds:02d}"
+            columns = shutil.get_terminal_size().columns - 1
+            bar_width = max(4, min(24, columns - len(details) - len("visin: []")))
+            filled = int(fraction * bar_width)
+            bar = "#" * filled + "-" * (bar_width - filled)
+            line = f"visin: [{bar}]{details}"
+            if len(line) > columns:
+                line = line.split("  ETA", 1)[0]
+            if len(line) > columns:
+                line = f"visin: {fraction:.1%} {_bytes(done)} / {_bytes(total)}"
+        else:
+            line = f"visin: downloaded {_bytes(done)}"
+            if speed > 0:
+                line += f"  {_bytes(speed)}/s"
+        self.stream.write("\r" + line.ljust(self.width))
+        self.stream.flush()
+        self.width = len(line)
+
+    def close(self) -> None:
+        """End the terminal line before extraction or an error is printed."""
+        if self.terminal and self.width:
+            self.stream.write("\n")
+            self.stream.flush()
+            self.width = 0
