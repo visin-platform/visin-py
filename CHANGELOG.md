@@ -10,6 +10,14 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-01
+
+### Added
+
+- add unzip and keep archive as download options
+
+[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/visin-platform/visin-py/compare/v0.4.0...v0.5.0
 ## [0.4.0] - 2026-10-01
 
 ### Added
@@ -21,7 +29,6 @@ one, together with anything written by hand under Unreleased.
 - Dataset downloads show a single-line terminal progress bar with percentage, transferred size,
   speed and estimated time remaining, including the starting offset of resumed downloads.
 
-[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/visin-platform/visin-py/compare/v0.3.0...v0.4.0
 ## [0.3.0] - 2026-09-30
 
