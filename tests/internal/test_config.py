@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,7 @@ def test_each_setting_says_where_it_came_from(tmp_path, monkeypatch):
     assert settings.sources == {"url": str(path), "token": "environment", "project": "argument"}
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Windows has no group or other permission bits")
 def test_a_token_in_a_file_others_can_read_is_warned_about(tmp_path, caplog):
     write_config(tmp_path, "VISIN_TOKEN=t\n", mode=0o644)
     read_settings()
@@ -118,7 +120,7 @@ def test_the_config_file_lives_in_the_home_folder_not_in_visin_dir(monkeypatch, 
     from visin._internal.config import config_path
 
     monkeypatch.delenv("VISIN_CONFIG")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
     monkeypatch.setenv("VISIN_DIR", str(tmp_path / "scratch"))
     assert config_path() == tmp_path / "home" / ".visin" / "config"
 

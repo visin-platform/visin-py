@@ -58,8 +58,7 @@ visin sync             # send it
     "another visin sync, or a run catching up, is already sending …" (`visin.SyncInProgressError`
     from Python) and sends nothing, since a benchmark or config sent twice would be stored twice. A
     run that lost Visin and is catching up takes the same lock, and waits for its next try while a
-    sync holds it. A sync running alongside an offline training job is fine. On Windows there is no
-    such lock, so start only one sync at a time.
+    sync holds it. A sync running alongside an offline training job is fine.
 
 ## From Python
 

@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from fakes import BASE, ok, refused
@@ -155,7 +156,8 @@ def test_login_saves_a_checked_token_and_later_runs_need_no_exports(server, caps
     assert code == 0, out
     settings = read_settings()
     assert (settings.url, settings.token) == ("https://v.test", "vsn_live_abcdefghijklmnop")
-    assert oct(config_path().stat().st_mode & 0o777) == "0o600"
+    if os.name == "posix":
+        assert oct(config_path().stat().st_mode & 0o777) == "0o600"
 
 
 def test_login_does_not_save_a_token_the_server_refuses(server, session, capsys):
