@@ -183,6 +183,60 @@ class Benchmark:
 
 
 @dataclass(frozen=True)
+class Configuration:
+    """What a run was launched with. ``config`` is the dict that was logged."""
+
+    id: str
+    uuid: str | None = None
+    name: str | None = None
+    training_id: str | None = None
+    config: dict[str, Any] = field(default_factory=dict)
+    created_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Configuration:
+        """The Configuration the server described in ``data``."""
+        return cls(
+            id=str(_pick(data, "_id", "id") or ""),
+            uuid=_str(data.get("uuid")),
+            name=_str(data.get("name")),
+            training_id=_str(data.get("trainingId")),
+            config=_dict(_pick(data, "config", "config_data", "configData")),
+            created_at=_str(_pick(data, "createdAt", "created_at")),
+            raw=dict(data),
+        )
+
+
+@dataclass(frozen=True)
+class Visualization:
+    """A frame stored against an epoch. ``url`` is a signed link, present when it was asked for."""
+
+    uuid: str
+    epoch_uuid: str | None = None
+    training_uuid: str | None = None
+    kind: str | None = None
+    filename: str | None = None
+    url: str | None = None
+    created_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Visualization:
+        """The Visualization the server described in ``data``."""
+        return cls(
+            uuid=str(_pick(data, "visualization_uuid", "visualizationUuid", "_id") or ""),
+            epoch_uuid=_str(_pick(data, "epoch_uuid", "epochUuid")),
+            training_uuid=_str(_pick(data, "training_uuid", "trainingUuid")),
+            kind=_str(data.get("type")),
+            filename=_str(data.get("filename")),
+            url=_str(_pick(data, "signedUrl", "url")),
+            created_at=_str(_pick(data, "createdAt", "created_at")),
+            raw=dict(data),
+        )
+
+
+@dataclass(frozen=True)
 class Dataset:
     """A dataset on Visin. ``size`` is the zip's size in bytes, when it has one."""
 

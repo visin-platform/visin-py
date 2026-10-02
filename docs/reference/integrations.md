@@ -9,3 +9,8 @@
     options:
       heading: Lightning VisinCallback
       show_bases: false
+
+::: visin.integrations.huggingface.VisinCallback
+    options:
+      heading: Hugging Face VisinCallback
+      show_bases: false

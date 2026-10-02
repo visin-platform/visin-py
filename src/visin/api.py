@@ -14,14 +14,16 @@ keys**); a pipeline key works too, for its one project.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Iterator, Mapping
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from ._internal.config import read_settings
+from ._internal.config import HOSTED_URL, read_settings
 from ._internal.transport import HttpClient
 from .errors import ConfigurationError
-from .models import Benchmark, Epoch, Project, TestResult, Training
+from .models import Benchmark, Configuration, Epoch, Project, TestResult, Training, Visualization
 
 # The server's cap on one page.
 MAX_PAGE_SIZE = 1000
@@ -72,7 +74,9 @@ class Api:
         if client is None:
             settings = read_settings(url=url, token=token, verify_ssl=verify_ssl)
             if not settings.url:
-                raise ConfigurationError("no Visin to read from: pass url= or set VISIN_URL")
+                raise ConfigurationError(
+                    f"no Visin to read from: pass url= or set VISIN_URL (hosted Visin: {HOSTED_URL})"
+                )
             client = HttpClient(settings.url, settings.token, verify=settings.verify_ssl)
         self._client = client
 
@@ -159,6 +163,56 @@ class Api:
             return ref
         return Training.from_json(self._get(f"/trainings/uuid/{quote(ref, safe='')}") or {})
 
+    def find(
+        self,
+        name: str | None = None,
+        *,
+        project: str | None = None,
+        tags: Iterable[str] | str | None = None,
+        status: str | None = None,
+    ) -> Training | None:
+        """The newest run called exactly ``name`` that matches the rest, or ``None``.
+
+        Without ``name``, the newest run that matches the filters. For a script
+        that must pick up where an earlier one left off without having kept
+        its UUID.
+        """
+        for training in self.trainings(project=project, status=status, tags=tags, search=name):
+            if name is None or training.name == name:
+                return training
+        return None
+
+    def tags(self) -> list[str]:
+        """Every tag on a run this credential can see."""
+        return [str(tag) for tag in self._get("/trainings/tags") or []]
+
+    def config(self, ref: str | Training) -> Configuration | None:
+        """What the run was launched with, or ``None`` if it logged no config."""
+        training = self.training(ref)
+        found = (self._get(f"/trainings/{quote(training.id, safe='')}/configs") or {}).get("configs") or []
+        return Configuration.from_json(found[0]) if found else None
+
+    def visualizations(self, ref: str | Training, kind: str | None = None) -> list[Visualization]:
+        """The frames a run stored, newest first, each with a signed link to its file.
+
+        ``kind`` keeps one kind, as given to ``upload_visualization``.
+        """
+        params = {"type": kind, "includeUrls": "true"}
+        pages = self._pages(
+            f"/visualizations/training/{quote(self._uuid(ref), safe='')}", "visualizations", params, 100
+        )
+        return [Visualization.from_json(item) for item in pages]
+
+    def download_visualization(self, visualization: Visualization, directory: str | os.PathLike[str]) -> Path:
+        """Save a frame under ``directory``, by its file name, and return the path."""
+        if not (visualization.url and visualization.filename):
+            raise ConfigurationError(f"visualization {visualization.uuid} has no link to download from")
+        target = Path(directory)
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / Path(visualization.filename).name
+        self._client.download_file(visualization.url, str(path))
+        return path
+
     def epochs(self, ref: str | Training) -> list[Epoch]:
         """Every epoch of a run, in epoch order."""
         training = self.training(ref)
@@ -218,3 +272,23 @@ class Api:
         if "timestamp" in frame:
             frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True)
         return frame.set_index("epoch") if "epoch" in frame else frame
+
+    def compare_frame(self, refs: Iterable[str | Training], metric: str, *, sep: str = ".") -> Any:
+        """One metric of several runs side by side: a row per epoch, a column per run.
+
+        ``metric`` is a flattened name such as ``val.mean_iou``. Columns are run
+        names; two runs with the same name are told apart by the start of their
+        UUID. A run that never reported the metric is a column of NaN.
+        """
+        try:
+            import pandas as pd  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise ImportError("compare_frame needs pandas: pip install 'visin[pandas]'") from exc
+        runs = [self.training(ref) for ref in refs]
+        names = [run.name for run in runs]
+        columns = {}
+        for run in runs:
+            label = run.name if names.count(run.name) == 1 else f"{run.name} ({run.uuid[:8]})"
+            frame = self.epochs_frame(run, sep=sep)
+            columns[label] = frame[metric] if metric in frame else pd.Series(dtype=float)
+        return pd.DataFrame(columns).sort_index()

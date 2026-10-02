@@ -7,4 +7,4 @@ and what `Api` and `sync` raise.
 ::: visin.errors
     options:
       show_root_heading: false
-      members: [VisinError, ConfigurationError, ApiError, TransportError]
+      members: [VisinError, ConfigurationError, ApiError, TransportError, SyncInProgressError]

@@ -1,6 +1,6 @@
 import pytest
 import requests
-from fakes import BASE, FakeResponse, ok, refused
+from fakes import BASE, FakeResponse, FakeSession, ok, refused
 from urllib3.exceptions import MaxRetryError, NewConnectionError, ProtocolError
 
 from visin._internal.transport import HttpClient, never_sent, worth_retrying_later
@@ -209,3 +209,9 @@ def test_put_file_refusal_is_an_api_error(client, uploads, tmp_path):
     uploads.answers = [FakeResponse(403, None, text="expired")]
     with pytest.raises(ApiError, match="expired"):
         client.put_file(f"{BASE}/signed", str(frame), "image/png")
+
+
+def test_an_address_without_a_scheme_is_https_and_a_pasted_token_loses_its_newline():
+    client = HttpClient("vision-api.visin.eu/", " vsn_live_abc\n", session=FakeSession())
+    assert client.base_url == "https://vision-api.visin.eu/api"
+    assert client.session.headers["Authorization"] == "Bearer vsn_live_abc"

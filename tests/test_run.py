@@ -168,8 +168,8 @@ def test_a_repeated_epoch_is_accepted_not_an_error(client, session):
     run = make_run(client)
     run.log_epoch(1, {"loss": 0.5})
     run.flush()
-    assert run._sender.failed == 0
-    assert run._sent == 1
+    assert run._delivery.sender.failed == 0
+    assert run._delivery.sent == 1
 
 
 def test_a_server_error_is_counted_but_never_raised(client, session):
@@ -177,7 +177,7 @@ def test_a_server_error_is_counted_but_never_raised(client, session):
     run = make_run(client)
     run.log_epoch(1, {"loss": 0.5})
     run.flush()
-    assert run._sender.failed == 1
+    assert run._delivery.sender.failed == 1
 
 
 # ---------------------------------------------------------------- test results, benchmarks, configs
@@ -285,7 +285,7 @@ def test_a_frame_overwritten_after_the_call_still_uploads_what_was_logged(client
     frame = tmp_path / "overlay.png"
     run = make_run(client, spool=visin._internal.spool.Spool(tmp_path / "d", "run-1"))
     blocker = __import__("threading").Event()
-    run._sender.submit(blocker.wait)  # hold the sender, as a slow network would
+    run._delivery.sender.submit(blocker.wait)  # hold the sender, as a slow network would
     frame.write_bytes(b"epoch 1")
     run.upload_visualization(1, frame)
     frame.write_bytes(b"epoch 2")
@@ -366,6 +366,15 @@ def test_a_refused_run_raises_at_startup(server, session):
     assert session.paths() == ["/trainings"]
 
 
+def test_a_refused_run_closes_its_connection(server, session, monkeypatch):
+    closed = []
+    monkeypatch.setattr(session, "close", lambda: closed.append(True))
+    session.route("POST", "/trainings", refused(403, "Access denied to project"))
+    with pytest.raises(ApiError):
+        Run.create("wrong project")
+    assert closed
+
+
 def test_create_with_a_config_logs_it(server, session):
     Run.create("with config", config={"lr": 1}).flush()
     assert sent(session, "/configs/upload")[0]["config_data"] == {"lr": 1}
@@ -440,10 +449,10 @@ def test_nothing_is_sent_after_finish(client, session, caplog):
     assert "has finished" in caplog.records[-1].message
 
 
-def test_an_unknown_status_falls_back_to_completed(client, session):
+def test_an_unknown_status_marks_the_run_failed(client, session):
     session.route("GET", "/trainings/uuid/", ok({"_id": "t1"}))
     make_run(client).finish("done")
-    assert sent(session, "/trainings/t1", "PUT")[0]["status"] == "completed"
+    assert sent(session, "/trainings/t1", "PUT")[0]["status"] == "failed"
 
 
 def test_context_manager_marks_a_crash_as_failed(client, session):
@@ -511,12 +520,12 @@ def test_a_run_that_cannot_reach_visin_at_start_keeps_everything_and_catches_up(
     monkeypatch.setattr(server, "retries", 0)
     run = Run.create("cluster job")
     assert run.mode == "online"
-    assert run._spooling
+    assert run._delivery.spooling
     run.log_epoch(1, {"loss": 1})
     run.flush()
     # The server is back: the kept run and epoch go first, in order.
     assert session.paths("POST")[-2:] == ["/trainings", "/epochs/upload"]
-    assert not run._spooling
+    assert not run._delivery.spooling
     run.finish()
 
 
@@ -526,16 +535,16 @@ def test_losing_visin_mid_run_keeps_reports_until_it_answers(client, session, tm
     client.retries = 0
     run.log_epoch(1, {"loss": 1})  # lost; kept on disk
     run.flush()
-    assert run._spool.count() == 1
+    assert run._delivery.spool.count() == 1
     run.log_epoch(2, {"loss": 0.5})  # catch-up fails again: both kept
     run.flush()
-    assert run._spool.count() == 2
+    assert run._delivery.spool.count() == 2
     run.log_epoch(3, {"loss": 0.25})  # back: everything, in order
     run.flush()
     epochs = [body["epoch"] for body in sent(session, "/epochs/upload")]
     assert epochs[-3:] == [1, 2, 3]
-    assert run._spool.count() == 0
-    assert run._sender.failed == 0
+    assert run._delivery.spool.count() == 0
+    assert run._delivery.sender.failed == 0
 
 
 def test_a_refusal_is_not_kept_for_later(client, session, tmp_path):
@@ -543,8 +552,8 @@ def test_a_refusal_is_not_kept_for_later(client, session, tmp_path):
     run = make_run(client, spool=visin._internal.spool.Spool(tmp_path, "run-1"))
     run.log_epoch(1, {"loss": 1})
     run.flush()
-    assert run._spool.count() == 0
-    assert run._sender.failed == 1
+    assert run._delivery.spool.count() == 0
+    assert run._delivery.sender.failed == 1
 
 
 def test_finish_reports_what_is_still_waiting(client, session, tmp_path, caplog):
@@ -554,7 +563,7 @@ def test_finish_reports_what_is_still_waiting(client, session, tmp_path, caplog)
     run.log_epoch(1, {"loss": 1})
     with caplog.at_level(logging.WARNING, logger="visin"):
         run.finish()
-    assert run._spool.count() == 2  # the epoch and the final status
+    assert run._delivery.spool.count() == 2  # the epoch and the final status
     assert "visin sync" in caplog.records[-1].message
 
 
@@ -667,7 +676,7 @@ def test_a_run_uuid_that_cannot_name_a_file_still_reports_online(server, session
     frame.write_bytes(b"x")
     session.route("POST", "/visualizations/upload-url", grant())
     run = Run.attach("odd/uuid")
-    assert run.mode == "online" and run._spool is None
+    assert run.mode == "online" and run._delivery.spool is None
     run.upload_visualization(1, frame)
     run.flush()
     assert sent(session, "/visualizations")[0]["size"] == 1
@@ -708,7 +717,7 @@ def test_an_offline_disk_that_cannot_be_written_is_reported(monkeypatch, caplog,
     def full(_op):
         raise OSError("No space left on device")
 
-    monkeypatch.setattr(run._spool, "append", full)
+    monkeypatch.setattr(run._delivery.spool, "append", full)
     with caplog.at_level(logging.WARNING, logger="visin"):
         run.log_epoch(1, {"loss": 1})
     assert "No space left" in caplog.records[-1].message
@@ -716,14 +725,14 @@ def test_an_offline_disk_that_cannot_be_written_is_reported(monkeypatch, caplog,
 
 def test_kept_reports_the_server_refuses_on_catch_up_are_logged(client, session, tmp_path, caplog):
     run = make_run(client, spool=visin._internal.spool.Spool(tmp_path, "run-1"))
-    run._spool.append({"op": "epoch", "body": {}})
-    run._start_spooling()
+    run._delivery.spool.append({"op": "epoch", "body": {}})
+    run._delivery.start_spooling()
     session.route("POST", "/epochs/upload", refused(400, "Results are required"))
     with caplog.at_level(logging.WARNING, logger="visin"):
         run.log_epoch(2, {"loss": 1})
         run.flush()
     assert any("refused a kept report" in record.message for record in caplog.records)
-    assert not run._spooling
+    assert not run._delivery.spooling
 
 
 # ---------------------------------------------------------------- a real process
@@ -787,8 +796,8 @@ def test_creating_a_run_spends_a_short_retry_budget(server, session, monkeypatch
     # drops packets held init() for close to a minute.
     session.route("POST", "/trainings", *[requests.exceptions.ConnectTimeout("timed out")] * 10)
     run = Run.create("x")
-    assert run._spooling
-    assert session.paths("POST").count("/trainings") == visin.run.CREATE_RETRIES + 1
+    assert run._delivery.spooling
+    assert session.paths("POST").count("/trainings") == visin._internal.delivery.CREATE_RETRIES + 1
 
 
 def test_a_catch_up_tries_once(client, session, tmp_path):
@@ -800,7 +809,7 @@ def test_a_catch_up_tries_once(client, session, tmp_path):
     assert attempts == client.retries + 1  # the first loss spends the full budget, in the background
     run.log_epoch(2, {"loss": 1})
     run.flush()
-    assert len(session.calls) == attempts + visin.run.CATCH_UP_RETRIES + 1
+    assert len(session.calls) == attempts + visin._internal.delivery.CATCH_UP_RETRIES + 1
 
 
 def test_reports_a_timed_out_finish_could_not_send_are_kept_on_disk(client, session, tmp_path):
@@ -808,12 +817,12 @@ def test_reports_a_timed_out_finish_could_not_send_are_kept_on_disk(client, sess
 
     run = make_run(client, spool=visin._internal.spool.Spool(tmp_path, "run-1"))
     blocked = threading.Event()
-    run._sender.submit(blocked.wait)  # the network, stuck
+    run._delivery.sender.submit(blocked.wait)  # the network, stuck
     run.log_epoch(1, {"loss": 1})
     run.log_epoch(2, {"loss": 1})
     run.finish(timeout=0.1)
     blocked.set()
-    kinds = [json.loads(line)["op"] for line in run._spool.path.read_text().splitlines()]
+    kinds = [json.loads(line)["op"] for line in run._delivery.spool.path.read_text().splitlines()]
     assert kinds == ["epoch", "epoch", "update"]
 
 
@@ -823,13 +832,13 @@ def test_a_dropped_visualization_leaves_no_staged_file(client, session, tmp_path
     frame = tmp_path / "f.png"
     frame.write_bytes(b"x")
     run = make_run(client, spool=visin._internal.spool.Spool(tmp_path / "d", "run-1"))
-    run._sender = visin._internal.sender.Sender(max_queue=1)
+    run._delivery.sender = visin._internal.sender.Sender(max_queue=1)
     blocked, running = threading.Event(), threading.Event()
-    run._sender.submit(lambda: (running.set(), blocked.wait()))
+    run._delivery.sender.submit(lambda: (running.set(), blocked.wait()))
     assert running.wait(5)  # the sender is busy...
-    run._sender.submit(lambda: None)  # ...and the queue is full
+    run._delivery.sender.submit(lambda: None)  # ...and the queue is full
     run.upload_visualization(1, frame)
-    assert list(run._spool.files.glob("*")) == []
+    assert list(run._delivery.spool.files.glob("*")) == []
     blocked.set()
 
 
@@ -963,3 +972,117 @@ def test_a_nonzero_exit_names_its_status(client, session, caplog):
     with caplog.at_level(logging.WARNING, logger="visin"), pytest.raises(SystemExit), make_run(client):
         raise SystemExit(2)
     assert any("exited with status 2" in record.message for record in caplog.records)
+
+
+def test_a_token_without_a_url_is_warned_about(monkeypatch, caplog):
+    monkeypatch.setenv("VISIN_TOKEN", "t")
+    with caplog.at_level(logging.WARNING, logger="visin"):
+        assert not Run.create("lonely token").enabled
+    assert "but VISIN_URL is not" in caplog.text and "vision-api.visin.eu" in caplog.text
+
+
+def test_nothing_set_at_all_stays_quiet(caplog):
+    with caplog.at_level(logging.WARNING, logger="visin"):
+        assert not Run.create("laptop").enabled
+    assert caplog.text == ""
+
+
+def test_a_run_knows_its_page_in_the_web_app(server, session, monkeypatch):
+    monkeypatch.setenv("VISIN_URL", "https://vision-api.visin.eu")
+    session.route("POST", "/trainings", ok({"_id": "t77"}))
+    run = Run.create("linked")
+    assert run.url == "https://app.visin.eu/trainings/t77"
+
+
+def test_a_self_hosted_run_has_a_page_only_when_told_the_app_address(server, session, monkeypatch):
+    session.route("POST", "/trainings", ok({"_id": "t77"}))
+    assert Run.create("unlinked").url is None
+    monkeypatch.setenv("VISIN_APP_URL", "https://app.example.test/")
+    session.route("POST", "/trainings", ok({"_id": "t78"}))
+    assert Run.create("linked").url == "https://app.example.test/trainings/t78"
+
+
+def test_an_array_is_uploaded_as_a_png_under_the_given_name(client, session, uploads, tmp_path):
+    import numpy as np
+
+    session.route("POST", "/visualizations/upload-url", grant())
+    run = make_run(client, spool=visin._internal.spool.Spool(tmp_path / "d", "run-1"))
+    run.upload_visualization(3, np.zeros((4, 6, 3), dtype=np.uint8), "overlay", name="sample_7")
+    run.flush()
+    reserve = sent(session, "/visualizations/upload-url")[0]
+    assert (reserve["filename"], reserve["mimetype"], reserve["type"]) == (
+        "sample_7.png",
+        "image/png",
+        "overlay",
+    )
+    assert uploads.puts[0]["bytes"].startswith(b"\x89PNG")
+    assert list((tmp_path / "d" / "runs" / "run-1.files").glob("*")) == []
+
+
+def test_an_array_without_a_name_is_called_after_its_kind(client, session, tmp_path):
+    import numpy as np
+
+    session.route("POST", "/visualizations/upload-url", grant())
+    run = make_run(client, spool=visin._internal.spool.Spool(tmp_path / "d", "run-1"))
+    run.upload_visualization(1, np.zeros((2, 2)), "mask")
+    run.flush()
+    assert sent(session, "/visualizations/upload-url")[0]["filename"] == "mask.png"
+
+
+def test_an_image_that_cannot_be_read_is_reported_not_raised(client, tmp_path, caplog):
+    import numpy as np
+
+    run = make_run(client, spool=visin._internal.spool.Spool(tmp_path / "d", "run-1"))
+    with caplog.at_level(logging.WARNING, logger="visin"):
+        run.upload_visualization(1, np.zeros((2, 2, 7)))
+    assert "cannot make an image" in caplog.text
+
+
+def test_an_image_in_memory_needs_somewhere_to_be_kept(client, caplog):
+    import numpy as np
+
+    run = make_run(client)
+    with caplog.at_level(logging.WARNING, logger="visin"):
+        run.upload_visualization(1, np.zeros((2, 2)))
+    assert "needs disk" in caplog.text
+
+
+def test_a_report_the_queue_could_not_take_returns_no_uuid(client, tmp_path):
+    run = make_run(client, spool=visin._internal.spool.Spool(tmp_path / "d", "run-1"))
+    run.flush()
+    run._delivery.sender.stop()
+    assert run.log_epoch(1, train={"loss": 1.0}) is None
+    assert run.log_test_results(1, {"overall": {"iou": 0.5}}) is None
+
+
+def test_a_frame_whose_metadata_cannot_be_sent_leaves_no_staged_copy(client, tmp_path, caplog):
+    import numpy as np
+
+    run = make_run(client, spool=visin._internal.spool.Spool(tmp_path / "d", "run-1"))
+    with caplog.at_level(logging.WARNING, logger="visin"):
+        run.upload_visualization(1, np.zeros((2, 2)), metadata={"bad": object()})
+    assert "could not upload visualization" in caplog.text
+    assert list((tmp_path / "d" / "runs" / "run-1.files").glob("*")) == []
+
+
+def test_attach_with_nothing_configured_replaces_the_current_run(server, monkeypatch):
+    first = visin.init("first")
+    monkeypatch.delenv("VISIN_URL")
+    attached = Run.attach("other")
+    assert attached.mode == "disabled" and visin.get_run() is attached
+    first.finish()
+
+
+def test_a_catch_up_waits_while_a_sync_holds_the_lock(client, session, tmp_path):
+    from visin._internal.lock import exclusive
+
+    spool = visin._internal.spool.Spool(tmp_path / "d", "run-1")
+    run = make_run(client, spool=spool)
+    spool.append(
+        {"op": "epoch", "body": {"training_uuid": "run-1", "epoch_uuid": "e1", "epoch": 1, "results": {}}}
+    )
+    run._delivery.start_spooling()
+    with exclusive(spool.root / ".sync.lock"):
+        assert run._delivery.catch_up(force=True) is False
+    assert spool.count() == 1
+    assert run._delivery.catch_up(force=True) is True

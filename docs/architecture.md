@@ -26,6 +26,8 @@ src/visin/
 │   ├── process.py       the process's rank, and learning how it ended (crash, SIGTERM)
 │   ├── transport.py     HTTP: retries, response unwrapping, signed uploads
 │   ├── serialize.py     NumPy/tensors/NaN into JSON Visin accepts
+│   ├── delivery.py      one run's client, spool and sender: live sends, spooling, catch-up
+│   ├── payloads.py      the request bodies a run builds from what a caller passed
 │   ├── reports.py       what each kind of report is, and how it is delivered
 │   ├── sender.py        the background thread reports are sent from
 │   └── spool.py         reports on disk: the file format and syncing it

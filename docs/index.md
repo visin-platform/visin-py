@@ -1,7 +1,8 @@
 # visin
 
 `visin` sends a training run to [Visin](https://github.com/visin-platform/visin): its epochs, test
-results, benchmarks, prediction frames and config. It can also read runs back for analysis.
+results, benchmarks, prediction frames and config. It can also read runs back for analysis, and
+download the datasets Visin hosts. The hosted Visin is at [app.visin.eu](https://app.visin.eu).
 
 ```sh
 pip install visin
@@ -18,8 +19,7 @@ with visin.init("unet baseline", project="road-seg") as run:
 
 ## Why use it rather than `requests`
 
-Visin's HTTP API is small, and the [quickstart](https://github.com/visin-platform/visin) posts to it
-with `requests`. This package does the same, plus the things a long training job needs:
+Visin's HTTP API is small, and you could post to it with `requests`. This package does the same, plus the things a long training job needs:
 
 - **It never stops your training.** Reports are sent from a background thread. A failure is logged
   and counted, never raised into your loop.
@@ -36,8 +36,13 @@ with `requests`. This package does the same, plus the things a long training job
 
 ## Where to next
 
-- [Getting started](getting-started.md): a token, a project and your first run, in five minutes.
+- [Getting started](getting-started.md): install, a token, your first run and a dataset download.
+- [Configuration](guides/configuration.md): every environment variable, with the hosted Visin's addresses.
 - [What a run records](guides/reporting.md): epochs, test results, benchmarks, frames and configs.
 - [Offline and unreliable networks](guides/offline.md): clusters, compute nodes and `visin sync`.
-- [Keras and Lightning](guides/frameworks.md): one callback, no loop changes.
+- [Recipes](guides/recipes.md): SLURM, requeued jobs, Docker, CI and notebooks.
+- [Keras, Lightning and Hugging Face](guides/frameworks.md): one callback, no loop changes.
 - [Reading runs back](guides/reading.md): runs and their epochs as dicts or a pandas DataFrame.
+- [Datasets](guides/datasets.md): list and download the datasets on Visin.
+- [The visin command](guides/cli.md): `login`, `check`, `sync`, `runs`, `datasets`, `download` and `cache`.
+- [Troubleshooting](guides/troubleshooting.md): every warning visin logs, and what to do about it.

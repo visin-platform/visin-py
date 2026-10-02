@@ -119,8 +119,12 @@ class HttpClient:
         sleep: Callable[[float], None] = time.sleep,
     ):
         # Tolerate both "https://host" and "https://host/api": the old scripts
-        # hard-coded the latter and people will paste either.
-        base = base_url.rstrip("/")
+        # hard-coded the latter and people will paste either. A host with no
+        # scheme is https, and a token pasted with its newline is the token.
+        base = base_url.strip().rstrip("/")
+        if "://" not in base:
+            base = "https://" + base
+        token = token.strip() if token else token
         self.base_url = base if base.endswith("/api") else base + "/api"
         self.timeout = timeout
         self.retries = retries

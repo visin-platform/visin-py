@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from typing import Any
 
 _PREFIXES = (
-    ("val", ("val_", "val/", "valid_", "valid/", "validation_", "validation/")),
+    ("val", ("val_", "val/", "valid_", "valid/", "validation_", "validation/", "eval_", "eval/")),
     ("train", ("train_", "train/", "training_", "training/")),
     ("test", ("test_", "test/")),
 )

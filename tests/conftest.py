@@ -18,13 +18,15 @@ def isolated(monkeypatch, tmp_path):
         if name.startswith("VISIN_") or name in ("RANK", "SLURM_PROCID", "OMPI_COMM_WORLD_RANK", "PMI_RANK"):
             monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("VISIN_DIR", str(tmp_path / "visin-dir"))
+    monkeypatch.setenv("VISIN_CONFIG", str(tmp_path / "config-dir" / "config"))
     monkeypatch.setattr(visin._internal.process.ProcessHooks, "install", classmethod(lambda cls: None))
     # How the process ended is process-wide state; every test starts from a clean one.
     monkeypatch.setattr(visin._internal.process.ProcessHooks, "crashed", False)
     monkeypatch.setattr(visin._internal.process.ProcessHooks, "terminated", False)
     hooks = FakeAtexit()
     monkeypatch.setattr(visin.run, "atexit", hooks)
-    monkeypatch.setattr(visin.run, "CATCH_UP_INTERVAL", 0.0)
+    monkeypatch.setattr("visin._internal.delivery.CATCH_UP_INTERVAL", 0.0)
+    monkeypatch.setattr(visin.run, "_current", [])
     return hooks
 
 

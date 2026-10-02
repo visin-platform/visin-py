@@ -44,7 +44,7 @@ def datasets(monkeypatch, client, session, uploads, tmp_path):
 
 
 def test_a_dataset_service_address_is_needed():
-    with pytest.raises(ConfigurationError, match="VISIN_DATASET_URL"):
+    with pytest.raises(ConfigurationError, match=r"VISIN_DATASET_URL.*dataset-api\.visin\.eu"):
         Datasets()
 
 
@@ -339,3 +339,45 @@ def test_cli_download_options(datasets, capsys, flags, zip_only):
     assert output.endswith(".zip") == zip_only
     assert list(datasets.directory.glob("*.zip"))
     assert bool(list(datasets.directory.glob(f"zod-{ZOD_ID}"))) != zip_only
+
+
+def test_cached_datasets_lists_what_is_on_disk_without_a_server(datasets, tmp_path):
+    datasets.download("zod", keep_archive=True)
+    (tmp_path / "data" / "9f-other.zip.part").write_bytes(b"x" * 10)
+    from visin import cached_datasets
+
+    kinds = {item.kind: item for item in cached_datasets(tmp_path / "data")}
+    assert set(kinds) == {"dataset", "archive", "partial"}
+    assert kinds["dataset"].name == "ZOD" and kinds["dataset"].id == ZOD_ID
+    assert kinds["archive"].size == len(ARCHIVE)
+
+
+def test_remove_cached_deletes_the_dataset_its_zip_and_leaves_others(datasets, tmp_path):
+    datasets.download("zod", keep_archive=True)
+    stranger = tmp_path / "data" / "ffff-other.zip"
+    stranger.write_bytes(b"x")
+    from visin import remove_cached
+
+    removed = remove_cached("zod", tmp_path / "data")
+    assert {item.kind for item in removed} == {"dataset", "archive"}
+    assert stranger.exists()
+    assert not list((tmp_path / "data").glob(f"*{ZOD_ID}*"))
+    with pytest.raises(VisinError, match="nothing downloaded"):
+        remove_cached("zod", tmp_path / "data")
+
+
+def test_an_empty_or_missing_data_directory_lists_nothing(tmp_path):
+    from visin import cached_datasets
+
+    assert cached_datasets(tmp_path / "nowhere") == []
+
+
+def test_remove_cached_matches_names_exactly_not_by_prefix(tmp_path):
+    from visin import remove_cached
+
+    data = tmp_path / "data"
+    (data / "zod-full-aaa1.unpacking").mkdir(parents=True)
+    (data / "zo-bbb2.unpacking").mkdir()
+    removed = remove_cached("zo", data)
+    assert [item.path.name for item in removed] == ["zo-bbb2.unpacking"]
+    assert (data / "zod-full-aaa1.unpacking").exists()

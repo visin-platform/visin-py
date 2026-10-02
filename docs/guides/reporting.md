@@ -45,7 +45,12 @@ snapshot of memory and GPU use to each epoch. That fills the run's **System** ta
 - per GPU: memory used, reserved and peak, temperature, power and fan speed
 
 GPU figures come from PyTorch if your script has already imported it, and from `nvidia-smi`
-otherwise.
+otherwise. `pip install 'visin[system]'` adds `psutil` for CPU load and the process's own use.
+
+Benchmarks record what the machine is, through `visin.system_info()`: core counts, memory, OS,
+Python version, the CPU model, and for GPUs the name, memory, driver and CUDA version. Call it
+yourself to see exactly what is sent; nothing else about the machine leaves it. Pass your own
+`system_info` to `log_benchmark` to override any of it.
 
 ## Test results
 
@@ -100,6 +105,22 @@ can render the next epoch's frame over it straight away. `kind` is your own name
 shows, and the Visualizations tab filters by it. Render the same inputs under the same file names
 each epoch, and you can follow one image through training.
 
+An image you hold in memory needs no file. Pass the array, tensor, PIL image or Matplotlib figure,
+and give it a `name`:
+
+```python
+overlay = (0.6 * image + 0.4 * mask_colour).clip(0, 255).astype("uint8")  # H x W x 3
+run.upload_visualization(12, overlay, kind="overlay", name="sample_0001")
+fig = plot_confusion(...)
+run.upload_visualization(12, fig, kind="confusion")  # stored as confusion.png
+```
+
+It is stored as PNG. Arrays and tensors may be `H x W`, `H x W x 3`, `H x W x 4`, or channels first
+(`3 x H x W`). A float array is read as 0 to 1, or as 0 to 255 when it holds a larger value. No
+extra package is needed for arrays and tensors; PIL images and figures are saved by their own
+libraries. The name defaults to `<kind>.png`, so give each frame its own when you log several per
+epoch.
+
 ## Config
 
 ```python
@@ -135,6 +156,40 @@ with run:
   checkpoint's file name: `log_epoch` returns it, and `visin.epoch_uuid_for(training_uuid, epoch)`
   gives the same UUID anywhere. `log_test_results`, `log_benchmark` and `upload_visualization` all
   take it.
+
+## Logging without passing the run around
+
+A helper deep in a training codebase can log without being handed the run. `init` and `Run.attach`
+remember the run they made, and these functions use it:
+
+```python
+# train.py
+visin.init("unet baseline", project="road-seg")
+
+# losses.py, anywhere in the same process
+import visin
+
+visin.log_epoch(epoch, train={"loss": loss})
+```
+
+`visin.get_run()` returns that run, for anything the shortcuts do not cover.
+`log_epoch`, `log_test_results`, `log_benchmark`, `log_config`, `upload_visualization`, `update` and
+`finish` all take what the `Run` methods take. With no run started they do nothing, like a disabled
+run. A run made with `Run.create` directly is yours to hold and is not made current. With two runs in
+one process, call the methods on the one you mean.
+
+## Finding the run in Visin
+
+`run.url` is the run's page in the web app, once the server has answered `init`:
+
+```python
+with visin.init("unet baseline") as run:
+    print(run.url)  # https://app.visin.eu/trainings/…
+```
+
+It is `None` for an offline or disabled run, and for a self-hosted deployment until you set
+`VISIN_APP_URL`. The same link is in the log line printed when the run is created; see
+`visin.enable_console_logging()` to see it.
 
 ## Resuming
 

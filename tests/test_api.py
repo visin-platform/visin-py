@@ -15,7 +15,7 @@ def page(key, items, page_number, pages):
 
 
 def test_an_api_needs_a_url():
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match=r"VISIN_URL.*vision-api\.visin\.eu"):
         Api()
 
 
@@ -152,3 +152,97 @@ def test_a_model_reads_either_spelling_of_a_field():
     snake = TestResult.from_json({"epoch_uuid": "e", "training_uuid": "t", "test_uuid": "x"})
     camel = TestResult.from_json({"epochUuid": "e", "trainingUuid": "t", "testUuid": "x"})
     assert snake == camel
+
+
+def test_find_returns_the_newest_run_with_exactly_that_name(api, session):
+    session.route(
+        "GET",
+        "/trainings",
+        page(
+            "trainings",
+            [{"name": "unet baseline v2", "uuid": "a"}, {"name": "unet baseline", "uuid": "b"}],
+            1,
+            1,
+        ),
+    )
+    assert api.find("unet baseline", project="road-seg").uuid == "b"
+    assert session.calls[0]["params"]["search"] == "unet baseline"
+    assert session.calls[0]["params"]["projectId"] == "road-seg"
+
+
+def test_find_is_none_when_nothing_matches(api, session):
+    session.route("GET", "/trainings", page("trainings", [{"name": "other"}], 1, 1))
+    assert api.find("missing") is None
+
+
+def test_find_without_a_name_is_the_newest_run_that_matches_the_filters(api, session):
+    session.route("GET", "/trainings", page("trainings", [{"name": "a", "uuid": "u"}], 1, 1))
+    assert api.find(tags=["ablation"]).uuid == "u"
+
+
+def test_tags(api, session):
+    session.route("GET", "/trainings/tags", ok(["a", "b"]))
+    assert api.tags() == ["a", "b"]
+
+
+def test_config_is_what_the_run_logged(api, session):
+    session.route(
+        "GET", "/trainings/t1/configs", ok({"configs": [{"_id": "c1", "config": {"lr": 0.1}}], "total": 1})
+    )
+    config = api.config(RUN)
+    assert config.config == {"lr": 0.1} and config.id == "c1"
+
+
+def test_config_is_none_when_the_run_logged_none(api, session):
+    session.route("GET", "/trainings/t1/configs", ok({"configs": [], "total": 0}))
+    assert api.config(RUN) is None
+
+
+def test_visualizations_come_with_signed_links_and_can_be_downloaded(api, session, uploads, tmp_path):
+    items = [
+        {
+            "visualization_uuid": "v1",
+            "type": "overlay",
+            "filename": "a.png",
+            "signedUrl": "https://files.example.test/a",
+        }
+    ]
+    session.route("GET", "/visualizations/training/u1", page("visualizations", items, 1, 1))
+    uploads.files["https://files.example.test/a"] = b"\x89PNG"
+    (frame,) = api.visualizations(RUN, kind="overlay")
+    assert (frame.kind, frame.filename) == ("overlay", "a.png")
+    assert session.calls[0]["params"]["type"] == "overlay"
+    assert session.calls[0]["params"]["includeUrls"] == "true"
+    assert api.download_visualization(frame, tmp_path / "frames").read_bytes() == b"\x89PNG"
+
+
+def test_a_visualization_without_a_link_cannot_be_downloaded(api, tmp_path):
+    from visin import Visualization
+
+    with pytest.raises(ConfigurationError, match="no link"):
+        api.download_visualization(Visualization(uuid="v1", filename="a.png"), tmp_path)
+
+
+def test_compare_frame_puts_runs_side_by_side(api, session):
+    pytest.importorskip("pandas")
+    session.route("GET", "/trainings/uuid/a", ok({"_id": "ta", "uuid": "a", "name": "one"}))
+    session.route("GET", "/trainings/uuid/b", ok({"_id": "tb", "uuid": "b", "name": "two"}))
+    session.route(
+        "GET", "/epochs/training/ta", ok({"epochs": [{"epoch": 1, "results": {"val": {"iou": 0.1}}}]})
+    )
+    session.route(
+        "GET",
+        "/epochs/training/tb",
+        ok(
+            {
+                "epochs": [
+                    {"epoch": 1, "results": {"val": {"iou": 0.2}}},
+                    {"epoch": 2, "results": {"val": {"iou": 0.4}}},
+                ]
+            }
+        ),
+    )
+    frame = api.compare_frame(["a", "b"], "val.iou")
+    assert list(frame.columns) == ["one", "two"]
+    assert frame.loc[2, "two"] == 0.4
+    assert frame["one"].isna().loc[2]

@@ -27,15 +27,19 @@ nav:
   - Getting started: getting-started.md
   - Guides:
       - What a run records: guides/reporting.md
+      - Tokens: guides/tokens.md
       - Configuration: guides/configuration.md
       - Offline and unreliable networks: guides/offline.md
-      - Keras and Lightning: guides/frameworks.md
+      - Recipes: guides/recipes.md
+      - Keras, Lightning and Hugging Face: guides/frameworks.md
       - Reading runs back: guides/reading.md
       - Datasets: guides/datasets.md
       - The visin command: guides/cli.md
+      - Troubleshooting: guides/troubleshooting.md
   - API reference:
       - visin: reference/index.md
       - Run and init: reference/run.md
+      - The current run: reference/shortcuts.md
       - Api: reference/api.md
       - Datasets: reference/datasets.md
       - Offline and sync: reference/offline.md

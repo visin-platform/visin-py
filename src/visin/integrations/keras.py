@@ -51,6 +51,8 @@ class VisinCallback(_Callback):  # type: ignore[misc]
     :func:`visin.init` when training begins, given any other keyword arguments
     (``name``, ``project``, ``tags``...), and finished when training ends.
     Epochs are numbered from ``first_epoch``, 1 by default, as Keras prints them.
+    ``fit(initial_epoch=...)`` carries on from there. A run this callback made is
+    finished when training ends, so calling ``fit`` again starts a new one.
     """
 
     def __init__(self, run: Run | None = None, *, first_epoch: int = 1, **init_kwargs: Any):
@@ -89,3 +91,4 @@ class VisinCallback(_Callback):  # type: ignore[misc]
     def on_train_end(self, logs: dict[str, Any] | None = None) -> None:
         if self._owns_run and self.run is not None:
             self.run.finish()
+            self.run = None

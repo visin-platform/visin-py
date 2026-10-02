@@ -88,6 +88,16 @@ class Spool:
         shutil.copyfile(source, self.files / name)
         return name
 
+    def stage_bytes(self, data: bytes, filename: str) -> str:
+        """Write ``data`` into ``files`` as a staged upload, like :meth:`stage`.
+
+        For an image that exists only in memory. Returns the file's name inside ``files``.
+        """
+        self.files.mkdir(parents=True, exist_ok=True)
+        name = f"{uuidlib.uuid4().hex[:12]}-{os.path.basename(filename)}"
+        (self.files / name).write_bytes(data)
+        return name
+
     def batches(self) -> list[Path]:
         """Claimed batches left by an earlier, interrupted sync, oldest first."""
         if not self.root.exists():
@@ -298,6 +308,9 @@ def pending_runs(directory: Path | str) -> list[str]:
             name = path.name.rsplit(".", 2)[0]
         else:
             continue
-        mtime = path.stat().st_mtime
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
         seen[name] = min(mtime, seen.get(name, mtime))
     return sorted(seen, key=lambda name: seen[name])

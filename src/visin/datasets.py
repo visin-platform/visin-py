@@ -25,11 +25,12 @@ import shutil
 import sys
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from ._internal.config import read_settings
+from ._internal.config import HOSTED_DATASET_URL, read_settings
 from ._internal.transport import HttpClient
 from .errors import ApiError, ConfigurationError, VisinError
 from .models import Dataset
@@ -60,7 +61,10 @@ class Datasets:
         )
         if client is None:
             if not settings.dataset_url:
-                raise ConfigurationError("no Visin dataset service: pass url= or set VISIN_DATASET_URL")
+                raise ConfigurationError(
+                    "no Visin dataset service: pass url= or set VISIN_DATASET_URL "
+                    f"(hosted Visin: {HOSTED_DATASET_URL})"
+                )
             client = HttpClient(settings.dataset_url, settings.token, verify=settings.verify_ssl)
         self._client = client
         self.directory = settings.data_directory
@@ -186,6 +190,83 @@ class Datasets:
             except OSError as exc:
                 logger.warning("visin: dataset extracted, but could not delete archive %s: %s", zip_path, exc)
         return _dataset_root(target)
+
+
+@dataclass(frozen=True)
+class CachedDataset:
+    """Something downloaded datasets left on disk.
+
+    ``kind`` is ``dataset`` (unpacked and complete), ``archive`` (a finished ZIP
+    kept with ``keep_archive`` or ``unzip=False``), or ``partial`` (an
+    interrupted download or unpack, which the next download resumes or redoes).
+    """
+
+    kind: str
+    name: str
+    id: str | None
+    path: Path
+    size: int
+
+
+def _disk_size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def cached_datasets(directory: str | Path | None = None) -> list[CachedDataset]:
+    """What is in the data directory, largest first. No server is needed."""
+    base = Path(directory).expanduser() if directory else read_settings().data_directory
+    if not base.is_dir():
+        return []
+    found = []
+    for entry in sorted(base.iterdir()):
+        if entry.is_dir() and (entry / MARKER).exists():
+            try:
+                info = json.loads((entry / MARKER).read_text())
+            except ValueError:
+                info = {}
+            found.append(
+                CachedDataset(
+                    "dataset", info.get("name") or entry.name, info.get("id"), entry, _disk_size(entry)
+                )
+            )
+        elif entry.is_dir() and entry.name.endswith(".unpacking"):
+            slug, _, dataset_id = entry.name.removesuffix(".unpacking").rpartition("-")
+            found.append(CachedDataset("partial", slug, dataset_id or None, entry, _disk_size(entry)))
+        elif entry.is_file() and entry.name.endswith((".zip", ".zip.part")):
+            kind = "partial" if entry.name.endswith(".part") else "archive"
+            dataset_id = entry.name.split("-", 1)[0]
+            found.append(CachedDataset(kind, entry.name, dataset_id, entry, _disk_size(entry)))
+    return sorted(found, key=lambda item: -item.size)
+
+
+def remove_cached(ref: str, directory: str | Path | None = None) -> list[CachedDataset]:
+    """Delete a downloaded dataset by name or id, with its ZIP and any partial download.
+
+    Returns what was removed, and raises :class:`~visin.errors.VisinError` when nothing matches.
+    """
+    wanted = ref.strip().lower()
+    items = cached_datasets(directory)
+    named = {
+        item.id
+        for item in items
+        if item.id
+        and (
+            item.id.lower() == wanted
+            or (item.kind == "dataset" and item.name.lower() == wanted)
+            or (item.kind == "partial" and item.path.is_dir() and item.name == _slug(ref))
+        )
+    }
+    doomed = [item for item in items if item.id in named]
+    if not doomed:
+        raise VisinError(f"nothing downloaded matches {ref!r}")
+    for item in doomed:
+        if item.path.is_dir():
+            shutil.rmtree(item.path)
+        else:
+            item.path.unlink()
+    return doomed
 
 
 def _slug(name: str) -> str:

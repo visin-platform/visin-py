@@ -25,7 +25,7 @@ Point it at your Visin with two environment variables. Without them, the same sc
 reports nothing.
 
 ```sh
-export VISIN_URL=https://vision-api.example.com
+export VISIN_URL=https://vision-api.visin.eu
 export VISIN_TOKEN=…            # a pipeline key, from the project's Settings → Pipeline keys
 visin check --write             # confirm this machine can report
 ```
@@ -72,10 +72,11 @@ for run in api.trainings(project="road-seg", status="completed"):
 
 ## Datasets
 
-Datasets on Visin can be listed and downloaded, once, into `VISIN_DATA_DIR`:
+Public datasets on Visin need no account or token. They can be listed and downloaded, once, into
+`VISIN_DATA_DIR`:
 
 ```bash
-export VISIN_DATASET_URL=https://dataset-api.example.com
+export VISIN_DATASET_URL=https://dataset-api.visin.eu
 visin datasets
 visin download zod     # resumes if interrupted; prints the folder
 ```

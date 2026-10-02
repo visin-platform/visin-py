@@ -129,6 +129,10 @@ def recorded(server, session, uploads, tmp_path, monkeypatch):
     api.benchmarks(run, project="p")
     api.projects()
     api.project("road-seg")
+    api.find("n", project="road-seg")
+    api.tags()
+    api.config(run)
+    api.visualizations(run, kind="overlay")
 
     monkeypatch.setenv("VISIN_TOKEN", "vsn_live_contract")
     main(["check", "--project", "road-seg", "--write"])

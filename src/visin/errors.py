@@ -17,6 +17,10 @@ class ConfigurationError(VisinError):
     """Something the environment had to supply is missing or unusable."""
 
 
+class SyncInProgressError(VisinError):
+    """Another ``visin sync`` is already sending this directory's reports."""
+
+
 class ApiError(VisinError):
     """The server answered, and the answer was a refusal.
 

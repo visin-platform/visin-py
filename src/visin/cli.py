@@ -1,5 +1,7 @@
 """The ``visin`` command.
 
+visin login            save the address and token, so no export lines are needed
+visin logout           forget them
 visin check            can this machine reach Visin, and is the token good?
 visin check --write    ...and may it create a run? (makes one, then deletes it)
 visin sync             send reports kept on disk by offline or cut-off runs
@@ -7,20 +9,31 @@ visin sync --list      show what is waiting, send nothing
 visin runs             list recent runs
 visin datasets         list the datasets on Visin
 visin download zod     download a dataset (once) and print its folder
+visin cache            show what downloads left on disk; `visin cache rm zod` deletes one
 visin version
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import getpass
+import json
 import logging
+import os
 import sys
 import uuid as uuidlib
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import quote
 
-from ._internal.config import read_settings
+from ._internal.config import (
+    HOSTED_DATASET_URL,
+    HOSTED_URL,
+    config_path,
+    read_settings,
+    write_config,
+)
 from ._internal.spool import Spool, pending_runs
 from ._internal.transport import HttpClient
 from ._version import __version__
@@ -37,6 +50,15 @@ def _credential_kind(token: str | None) -> str:
     if token.count(".") == 2:
         return "JWT"
     return "unrecognised token"
+
+
+def _print_json(data: Any) -> None:
+    print(json.dumps(data, indent=2))
+
+
+def _origin(settings: Any, name: str) -> str:
+    where = settings.sources.get(name)
+    return f"  [{where}]" if where and where != "environment" else ""
 
 
 def _mask(token: str | None) -> str:
@@ -64,14 +86,16 @@ def cmd_check(args: argparse.Namespace) -> int:
     settings = read_settings(url=args.url, token=args.token, project=args.project)
     out = _Printer()
     print(f"visin {__version__}")
-    print(f"  url      {settings.url or '(VISIN_URL is not set)'}")
-    print(f"  token    {_mask(settings.token)} ({_credential_kind(settings.token)})")
-    print(f"  project  {settings.project or '-'}")
+    print(f"  url      {settings.url or '(VISIN_URL is not set)'}{_origin(settings, 'url')}")
+    print(
+        f"  token    {_mask(settings.token)} ({_credential_kind(settings.token)}){_origin(settings, 'token')}"
+    )
+    print(f"  project  {settings.project or '-'}{_origin(settings, 'project')}")
     print(f"  mode     {settings.effective_mode}")
     print(f"  kept in  {settings.directory}")
     print()
     if not settings.url:
-        out.fail("VISIN_URL is not set, so nothing will be reported")
+        out.fail(f"VISIN_URL is not set, so nothing will be reported (hosted Visin: {HOSTED_URL})")
         return 1
     client = HttpClient(settings.url, settings.token, verify=settings.verify_ssl, retries=1)
     try:
@@ -174,11 +198,72 @@ def _check_write(client: HttpClient, project: str | None, project_id: str | None
     return 1 if out.failed else 0
 
 
+def _ask(question: str, default: str | None = None) -> str:
+    shown = f" [{default}]" if default else ""
+    answer = input(f"{question}{shown}: ").strip()
+    return answer or default or ""
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    try:
+        current = read_settings()
+    except VisinError as exc:
+        print(f"visin login: {exc}", file=sys.stderr)
+        return 1
+    interactive = sys.stdin.isatty()
+    url = args.url or (_ask("Visin API address", current.url or HOSTED_URL) if interactive else None)
+    url = (url or current.url or HOSTED_URL).strip().rstrip("/")
+    if "://" not in url:
+        url = "https://" + url
+    token = args.token or (
+        getpass.getpass("Token (a pipeline key or API key): ").strip() if interactive else ""
+    )
+    if not token:
+        print("visin login: pass --token, or run it in a terminal to be asked", file=sys.stderr)
+        return 1
+    if not args.no_check:
+        out = _Printer()
+        client = HttpClient(url, token, verify=current.verify_ssl, retries=1)
+        try:
+            if _check(client, token, args.project, False, out) != 0:
+                print("visin login: not saved, because the check failed (use --no-check to save anyway)")
+                return 1
+        finally:
+            client.close()
+    values = {"VISIN_URL": url, "VISIN_TOKEN": token}
+    if args.project:
+        values["VISIN_PROJECT"] = args.project
+    if url.removesuffix("/api") == HOSTED_URL and not current.dataset_url:
+        values["VISIN_DATASET_URL"] = HOSTED_DATASET_URL
+    path = write_config(values)
+    print(f"saved to {path}")
+    shadowing = [name for name in values if (os.environ.get(name) or "").strip()]
+    if shadowing:
+        print(f"note: {', '.join(shadowing)} set in this environment win over the saved values")
+    return 0
+
+
+def cmd_logout(_args: argparse.Namespace) -> int:
+    path = config_path()
+    if not path.exists():
+        print(f"nothing saved at {path}")
+        return 0
+    os.remove(path)
+    print(f"removed {path}")
+    return 0
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     settings = read_settings(url=args.url, token=args.token, directory=args.dir)
     uuids = [args.run] if args.run else pending_runs(settings.directory)
+    if not uuids and args.list and args.json:
+        _print_json({})
+        return 0
     if not uuids:
         print(f"nothing waiting in {settings.directory}")
+        return 0
+    if args.list and args.json:
+        _print_json({uuid: Spool(settings.directory, uuid).count() for uuid in uuids})
         return 0
     if args.list:
         for uuid in uuids:
@@ -228,6 +313,22 @@ def cmd_runs(args: argparse.Namespace) -> int:
         except VisinError as exc:
             print(f"visin runs: {exc}", file=sys.stderr)
             return 1
+    if args.json:
+        settings = read_settings(url=args.url)
+        _print_json(
+            [
+                {
+                    **{
+                        k: v
+                        for k, v in dataclasses.asdict(run).items()
+                        if k not in ("raw", "metadata", "metrics")
+                    },
+                    "url": settings.run_link(run.id),
+                }
+                for run in runs
+            ]
+        )
+        return 0
     for run in runs:
         updated = (run.updated_at or "")[:16].replace("T", " ")
         print(f"{run.uuid:36}  {run.status or '':9}  {updated:16}  {run.name}")
@@ -243,6 +344,20 @@ def cmd_datasets(args: argparse.Namespace) -> int:
     except VisinError as exc:
         print(f"visin datasets: {exc}", file=sys.stderr)
         return 1
+    if args.json:
+        _print_json(
+            [
+                {
+                    "id": d.id,
+                    "name": d.name,
+                    "size": d.size,
+                    "filename": d.filename,
+                    "downloadable": d.downloadable,
+                }
+                for d in found
+            ]
+        )
+        return 0
     for dataset in found:
         shown = f"{dataset.size / 2**30:6.1f} GB" if dataset.size else "  no zip "
         print(f"{dataset.id:24}  {shown}  {dataset.name}")
@@ -263,6 +378,39 @@ def cmd_download(args: argparse.Namespace) -> int:
     return 0
 
 
+def _size(value: int) -> str:
+    for unit, scale in (("GB", 2**30), ("MB", 2**20), ("KB", 2**10)):
+        if value >= scale:
+            return f"{value / scale:.1f} {unit}"
+    return f"{value} B"
+
+
+def cmd_cache(args: argparse.Namespace) -> int:
+    from .datasets import cached_datasets, remove_cached
+
+    try:
+        if args.action == "rm":
+            removed = remove_cached(args.dataset, args.dir)
+            for item in removed:
+                print(f"removed {item.path}  ({_size(item.size)})")
+            print(f"freed {_size(sum(item.size for item in removed))}")
+            return 0
+        items = cached_datasets(args.dir)
+    except VisinError as exc:
+        print(f"visin cache: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json([{**dataclasses.asdict(item), "path": str(item.path)} for item in items])
+        return 0
+    for item in items:
+        print(f"{item.kind:9}  {_size(item.size):>9}  {item.name}  {item.path}")
+    if not items:
+        print("nothing downloaded")
+    else:
+        print(f"{_size(sum(item.size for item in items))} in {len(items)} items")
+    return 0
+
+
 def cmd_version(_args: argparse.Namespace) -> int:
     print(f"visin {__version__}")
     return 0
@@ -277,6 +425,16 @@ def build_parser() -> argparse.ArgumentParser:
     def server(sub: argparse.ArgumentParser) -> None:
         sub.add_argument("--url", help="the Visin API address (default: VISIN_URL)")
         sub.add_argument("--token", help="the credential (default: VISIN_TOKEN)")
+
+    login = commands.add_parser("login", help="save the address and token for this machine")
+    login.add_argument("--url", help="the Visin API address (asked for in a terminal)")
+    login.add_argument("--token", help="the credential (asked for in a terminal, without echo)")
+    login.add_argument("--project", help="the project runs go to; saved as VISIN_PROJECT")
+    login.add_argument("--no-check", action="store_true", help="save without contacting Visin")
+    login.set_defaults(handler=cmd_login)
+
+    logout = commands.add_parser("logout", help="delete the saved address and token")
+    logout.set_defaults(handler=cmd_logout)
 
     check = commands.add_parser("check", help="check the connection and the token")
     server(check)
@@ -296,6 +454,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="forget reports Visin refuses, instead of keeping them to retry",
     )
+    sync_cmd.add_argument(
+        "--json", action="store_true", help="with --list: print {run uuid: reports} as JSON"
+    )
     sync_cmd.set_defaults(handler=cmd_sync)
 
     runs = commands.add_parser("runs", help="list recent runs")
@@ -303,6 +464,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs.add_argument("--project", help="only this project's runs (its id or slug)")
     runs.add_argument("--status", choices=["pending", "running", "completed", "failed"])
     runs.add_argument("--limit", type=int, default=20)
+    runs.add_argument("--json", action="store_true", help="print the runs as JSON, with a link to each")
     runs.set_defaults(handler=cmd_runs)
 
     def dataset_server(sub: argparse.ArgumentParser) -> None:
@@ -312,6 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
     datasets = commands.add_parser("datasets", help="list the datasets on Visin")
     dataset_server(datasets)
     datasets.add_argument("--search", help="only datasets whose name matches")
+    datasets.add_argument("--json", action="store_true", help="print the datasets as JSON")
     datasets.set_defaults(handler=cmd_datasets)
 
     download = commands.add_parser("download", help="download a dataset (once) and print its folder")
@@ -323,6 +486,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     download.add_argument("--keep-archive", action="store_true", help="retain the ZIP after extraction")
     download.set_defaults(handler=cmd_download)
+
+    cache = commands.add_parser("cache", help="show or delete downloaded datasets")
+    cache.add_argument("--dir", help="the data directory (default: VISIN_DATA_DIR)")
+    cache.add_argument("--json", action="store_true", help="print the list as JSON")
+    cache_actions = cache.add_subparsers(dest="action", metavar="action")
+    remove = cache_actions.add_parser("rm", help="delete a downloaded dataset, by name or id")
+    remove.add_argument("dataset", help="its name or id")
+    remove.add_argument(
+        "--dir", default=argparse.SUPPRESS, help="the data directory (default: VISIN_DATA_DIR)"
+    )
+    cache.set_defaults(handler=cmd_cache, action=None)
 
     version = commands.add_parser("version", help="print the version")
     version.set_defaults(handler=cmd_version)

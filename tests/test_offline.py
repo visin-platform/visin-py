@@ -68,7 +68,7 @@ def test_sync_one_run(offline, server, session):
 
 
 def test_sync_needs_somewhere_to_send(offline):
-    with pytest.raises(ConfigurationError, match="VISIN_URL"):
+    with pytest.raises(ConfigurationError, match=r"VISIN_URL.*vision-api\.visin\.eu"):
         visin.sync()
 
 
@@ -80,3 +80,24 @@ def test_attach_offline_records_no_creation(offline):
         json.loads(line)["op"] for line in (offline / "runs" / "existing-run.jsonl").read_text().splitlines()
     ]
     assert kinds == ["epoch", "update"]
+
+
+def test_a_second_sync_over_the_same_directory_is_refused_while_one_runs(offline, server, session):
+    from visin._internal.lock import exclusive
+
+    session.route("GET", "/trainings/uuid/", ok({"_id": "t1"}))
+    visin.init("waiting").finish()
+    directory = visin.read_settings().directory
+    with exclusive(directory / "runs" / ".sync.lock") as first:
+        assert first
+        with pytest.raises(visin.SyncInProgressError, match="already sending"):
+            visin.sync()
+    assert visin.sync()[0].sent == 2
+
+
+def test_a_missing_file_while_listing_runs_is_not_an_error(tmp_path):
+    from visin._internal.spool import pending_runs
+
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs" / "a.jsonl").write_text("{}\n")
+    assert pending_runs(tmp_path) == ["a"]

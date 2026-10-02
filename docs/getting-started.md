@@ -1,6 +1,6 @@
 # Getting started
 
-You need a Visin you can sign in to and Python 3.9 or newer.
+You need an account on [Visin](https://app.visin.eu) (or your own deployment).
 
 ## 1. Install
 
@@ -20,14 +20,28 @@ Optional extras:
 A run belongs to a project. In Visin, open the project, go to **Settings → Pipeline keys** and
 choose **New pipeline key**. Copy the two lines it shows.
 
+See [Tokens](guides/tokens.md) for which key to use where.
+
 A pipeline key can write only to its own project. An API key that is not limited to a project
 (`vsn_live_…`, under **Account → API keys**) also works, and is the one to use for reading runs
 across projects.
 
 ## 3. Tell the script where Visin is
 
+The simplest way is to save it once on this machine:
+
 ```sh
-export VISIN_URL=https://vision-api.example.com   # your deployment's API address
+visin login        # asks for the address and the token, checks them, saves them
+```
+
+`visin login` keeps them in `~/.visin/config` (readable only by you), and every script and
+command on the machine picks them up. `visin logout` deletes the file. Use
+[`VISIN_PROJECT`](guides/configuration.md) or `--project` to set the project too.
+
+Or, for a job or a container, use environment variables, which win over the saved file:
+
+```sh
+export VISIN_URL=https://vision-api.visin.eu   # the hosted Visin; use your own address if self-hosted
 export VISIN_TOKEN=vsn_live_…
 export VISIN_PROJECT=road-seg                      # id or slug; optional with a pipeline key
 ```
@@ -78,3 +92,37 @@ Replace the made-up numbers with what your training step returns. Two habits kee
 
 Without `VISIN_URL` and `VISIN_TOKEN` the same script runs as before and reports nothing. That is
 what lets a colleague run it without an account.
+
+## 6. Download a dataset
+
+Datasets come from their own service, so they need a second address. Public datasets download
+without a token; `VISIN_TOKEN` is sent when set, for private ones.
+
+```sh
+export VISIN_DATASET_URL=https://dataset-api.visin.eu
+visin datasets          # list what is available
+visin download zod      # prints the folder it unpacked to
+```
+
+Without `VISIN_DATASET_URL`, `visin datasets` fails because the package has no default address.
+See [Datasets](guides/datasets.md) for the options.
+
+## If something goes wrong
+
+| You see | Cause |
+| --- | --- |
+| The script runs but nothing appears in Visin | `VISIN_URL` or `VISIN_TOKEN` is unset, so reporting is disabled. Run `visin check`, or `visin login`. With a token but no URL, the script logs a warning saying so. |
+| `visin check` says the key is not accepted | The token is wrong, or belongs to another deployment. Copy it again from **Settings → Pipeline keys**. |
+| `visin check --write` says a project is missing | An API key that is not limited to a project needs `VISIN_PROJECT`. A pipeline key does not. |
+| `visin datasets` fails at once | `VISIN_DATASET_URL` is unset. Datasets use their own address, shown in step 6. |
+
+Add `-v` (`visin -v check`) to log each request. [Troubleshooting](guides/troubleshooting.md) lists every warning visin logs.
+
+## Next
+
+- [What a run records](guides/reporting.md): test results, benchmarks, frames and configs.
+- [Keras, Lightning and Hugging Face](guides/frameworks.md): a callback instead of `log_epoch`.
+- [Tokens](guides/tokens.md): which key to use, and how to keep it safe.
+- [Configuration](guides/configuration.md): every environment variable.
+- [Recipes](guides/recipes.md): SLURM, requeued jobs, Docker, CI and notebooks.
+- [Offline and unreliable networks](guides/offline.md): compute nodes with no route to Visin.

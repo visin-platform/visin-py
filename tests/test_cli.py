@@ -1,7 +1,10 @@
+import json
+
 import pytest
-from fakes import ok, refused
+from fakes import BASE, ok, refused
 
 import visin
+from visin._internal.config import HOSTED_DATASET_URL, HOSTED_URL, config_path, read_settings
 from visin.cli import main
 from visin.errors import TransportError
 
@@ -143,3 +146,119 @@ def test_check_write_accepts_a_pipeline_key_without_a_project(server, session, c
     code, out = run_cli(capsys, "check", "--write")
     assert code == 0, out
     assert "/trainings/t1" in session.paths("DELETE")
+
+
+def test_login_saves_a_checked_token_and_later_runs_need_no_exports(server, capsys, monkeypatch):
+    monkeypatch.delenv("VISIN_URL")
+    monkeypatch.delenv("VISIN_TOKEN")
+    code, out = run_cli(capsys, "login", "--url", "https://v.test", "--token", "vsn_live_abcdefghijklmnop")
+    assert code == 0, out
+    settings = read_settings()
+    assert (settings.url, settings.token) == ("https://v.test", "vsn_live_abcdefghijklmnop")
+    assert oct(config_path().stat().st_mode & 0o777) == "0o600"
+
+
+def test_login_does_not_save_a_token_the_server_refuses(server, session, capsys):
+    session.route("GET", "/trainings/deleted", refused(401, "Invalid token"))
+    code, out = run_cli(capsys, "login", "--url", "https://v.test", "--token", "bad")
+    assert code == 1 and "not saved" in out
+    assert not config_path().exists()
+
+
+def test_login_for_the_hosted_visin_also_saves_the_dataset_address(server, capsys):
+    run_cli(capsys, "login", "--url", HOSTED_URL, "--token", "vsn_live_abcdefghijklmnop", "--no-check")
+    assert read_settings().dataset_url == HOSTED_DATASET_URL
+
+
+def test_login_keeps_other_lines_in_the_file(capsys):
+    config_path().parent.mkdir(parents=True)
+    config_path().write_text("# mine\nVISIN_MODE=offline\nVISIN_URL=https://old.test\n")
+    run_cli(capsys, "login", "--url", "https://new.test", "--token", "t", "--no-check")
+    assert (
+        config_path().read_text() == "# mine\nVISIN_MODE=offline\nVISIN_URL=https://new.test\nVISIN_TOKEN=t\n"
+    )
+
+
+def test_login_without_a_token_outside_a_terminal_says_what_to_pass(capsys):
+    code = main(["login"])
+    assert code == 1 and "--token" in capsys.readouterr().err
+
+
+def test_logout_removes_the_saved_file(capsys):
+    run_cli(capsys, "login", "--url", "https://v.test", "--token", "t", "--no-check")
+    code, _ = run_cli(capsys, "logout")
+    assert code == 0 and not config_path().exists()
+    assert run_cli(capsys, "logout")[0] == 0
+
+
+def test_check_says_when_a_value_came_from_the_config_file(server, capsys, monkeypatch):
+    monkeypatch.delenv("VISIN_URL")
+    config_path().parent.mkdir(parents=True)
+    config_path().write_text(f"VISIN_URL={BASE}\n")
+    _, out = run_cli(capsys, "check")
+    assert f"[{config_path()}]" in out
+
+
+def test_runs_can_be_printed_as_json_with_a_link_to_each(server, session, capsys, monkeypatch):
+    monkeypatch.setenv("VISIN_URL", HOSTED_URL)
+    session.route("GET", "/trainings", ok({"trainings": [{"_id": "t1", "uuid": "u1", "name": "baseline"}]}))
+    code, out = run_cli(capsys, "runs", "--json")
+    (run,) = json.loads(out)
+    assert code == 0
+    assert (run["uuid"], run["name"], run["url"]) == ("u1", "baseline", "https://app.visin.eu/trainings/t1")
+    assert "raw" not in run
+
+
+def test_sync_list_can_be_printed_as_json(server, session, capsys, monkeypatch):
+    assert json.loads(run_cli(capsys, "sync", "--list", "--json")[1]) == {}
+    monkeypatch.setenv("VISIN_MODE", "offline")
+    run = visin.init("offline")
+    run.finish()
+    monkeypatch.delenv("VISIN_MODE")
+    assert json.loads(run_cli(capsys, "sync", "--list", "--json")[1]) == {run.training_uuid: 2}
+
+
+def test_datasets_can_be_listed_as_json(client, session, capsys, monkeypatch):
+    monkeypatch.setenv("VISIN_DATASET_URL", BASE)
+    monkeypatch.setattr("visin.datasets.HttpClient", lambda *_args, **_kwargs: client)
+    session.route(
+        "GET", "/datasets", ok([{"_id": "d1", "name": "ZOD", "archive": {"size": 5, "filename": "z.zip"}}])
+    )
+    code, out = run_cli(capsys, "datasets", "--json")
+    (listed,) = json.loads(out)
+    assert code == 0 and listed["name"] == "ZOD" and listed["downloadable"] is True
+
+
+def test_cache_lists_and_removes_downloads(tmp_path, capsys):
+    data = tmp_path / "data"
+    folder = data / "zod-6aad"
+    folder.mkdir(parents=True)
+    (folder / ".visin-dataset.json").write_text(json.dumps({"id": "6aad", "name": "ZOD", "size": 3}))
+    (folder / "file.bin").write_bytes(b"x" * 2048)
+    code, out = run_cli(capsys, "cache", "--dir", str(data))
+    assert code == 0 and "ZOD" in out and "dataset" in out
+    listed = json.loads(run_cli(capsys, "cache", "--dir", str(data), "--json")[1])
+    assert listed[0]["id"] == "6aad"
+    code, out = run_cli(capsys, "cache", "rm", "zod", "--dir", str(data))
+    assert code == 0 and "freed" in out and not folder.exists()
+    code, _ = run_cli(capsys, "cache", "--dir", str(data), "rm", "zod")
+    assert code == 1
+    assert "nothing downloaded" in run_cli(capsys, "cache", "--dir", str(data))[1]
+
+
+def test_login_adds_https_to_a_bare_host_and_knows_it_is_the_hosted_visin(capsys):
+    run_cli(capsys, "login", "--url", "vision-api.visin.eu/", "--token", "t", "--no-check")
+    settings = read_settings()
+    assert settings.url == HOSTED_URL and settings.dataset_url == HOSTED_DATASET_URL
+
+
+def test_login_says_when_an_exported_variable_will_win(capsys, monkeypatch):
+    monkeypatch.setenv("VISIN_TOKEN", "exported")
+    _, out = run_cli(capsys, "login", "--url", "https://v.test", "--token", "t", "--no-check")
+    assert "VISIN_TOKEN set in this environment win" in out
+
+
+def test_login_with_a_broken_env_file_says_so(capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("VISIN_ENV_FILE", str(tmp_path / "missing.env"))
+    assert main(["login", "--token", "t", "--no-check"]) == 1
+    assert "VISIN_ENV_FILE" in capsys.readouterr().err

@@ -27,6 +27,28 @@ Each call returns typed objects (`Training`, `Epoch`, `TestResult`, `Benchmark`,
 Python field names: `run.project_id`, `epoch.learning_rate`. `.raw` on each is the server's JSON, for
 anything the class does not model. Methods that take a run accept a `Training` or its UUID.
 
+## Finding a run
+
+```python
+run = api.find("unet baseline", project="road-seg")  # the newest run with exactly that name, or None
+run = api.find(tags=["ablation"], status="completed")  # or the newest that matches filters
+api.tags()  # every tag in use
+```
+
+A later script can pick up an earlier run by name, without having kept its UUID.
+
+## What a run was launched with, and its frames
+
+```python
+config = api.config(run)  # the dict logged with log_config, or None
+config.config["lr"]
+
+for frame in api.visualizations(run, kind="overlay"):  # newest first, each with a signed link
+    api.download_visualization(frame, "frames/")  # saved under its file name
+```
+
+Signed links expire, so download soon after listing.
+
 ## As a DataFrame
 
 With `pip install 'visin[pandas]'`:
@@ -35,6 +57,12 @@ With `pip install 'visin[pandas]'`:
 frame = api.epochs_frame(run)
 frame[["train.loss", "val.loss"]].plot()
 best = frame["val.mean_iou"].idxmax()
+```
+
+Several runs side by side, one metric each:
+
+```python
+api.compare_frame([run_a, run_b, "5f0c6a2e-…"], "val.mean_iou").plot()
 ```
 
 There is one row per epoch, indexed by epoch number, with results flattened into columns such as

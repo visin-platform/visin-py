@@ -16,6 +16,8 @@ from visin.integrations._metrics import split_metrics
 class RecordingRun:
     """What a callback calls on a run, recorded."""
 
+    enabled = True
+
     def __init__(self):
         self.epochs = []
         self.tests = []
@@ -72,6 +74,13 @@ def lightning_integration(monkeypatch):
             "lightning.pytorch.callbacks": callbacks,
         },
     )
+
+
+@pytest.fixture
+def huggingface_integration(monkeypatch):
+    transformers = types.ModuleType("transformers")
+    transformers.TrainerCallback = BaseCallback
+    return fresh_import(monkeypatch, "visin.integrations.huggingface", {"transformers": transformers})
 
 
 # ---------------------------------------------------------------- metric names
@@ -171,6 +180,7 @@ def test_lightning_reports_each_epoch_with_its_validation(lightning_integration,
     )
     callback.setup(t, module, "fit")
     callback.on_train_epoch_start(t, module)
+    callback.on_validation_end(t, module)
     callback.on_train_epoch_end(t, module)
     callback.on_fit_end(t, module)
     assert run.configs == [({"lr": 0.001, "backbone": "b2"}, "SimpleNamespace")]
@@ -201,7 +211,7 @@ def test_lightning_does_not_start_a_run_on_other_ranks(lightning_integration, mo
 def test_lightning_test_metrics_become_a_test_result_on_the_last_epoch(lightning_integration):
     run = RecordingRun()
     callback = lightning_integration.VisinCallback(run, finish_after="test")
-    callback.on_train_epoch_end(trainer(current_epoch=9, callback_metrics={"val_loss": 1}), None)
+    callback.on_train_epoch_end(trainer(current_epoch=9, callback_metrics={"train_loss": 1}), None)
     callback.on_test_end(trainer(callback_metrics={"test_iou": 0.7, "test_loss": 0.3}), None)
     assert run.tests == [(10, {"overall": {"iou": 0.7, "loss": 0.3}})]
 
@@ -236,3 +246,157 @@ def test_a_missing_framework_says_what_to_install(monkeypatch):
     monkeypatch.delitem(sys.modules, "visin.integrations.lightning", raising=False)
     with pytest.raises(ImportError, match="pip install lightning"):
         importlib.import_module("visin.integrations.lightning")
+
+
+# ---------------------------------------------------------------- Hugging Face
+
+
+def trainer_state(epoch):
+    return types.SimpleNamespace(epoch=epoch, is_world_process_zero=True)
+
+
+def drive(callback, epochs, evaluate_after_epoch_end=True):
+    """The events a Trainer raises, in order: an end-of-epoch evaluation comes after the epoch-end event."""
+    args = types.SimpleNamespace(to_dict=lambda: {"lr": 1e-3})
+    callback.on_train_begin(args, trainer_state(0), None)
+    for number in range(1, epochs + 1):
+        state = trainer_state(float(number))
+        callback.on_epoch_begin(args, trainer_state(number - 1.0), None)
+        callback.on_log(
+            args, state, None, {"loss": 1.0 / number, "learning_rate": 0.1, "grad_norm": 2.0, "epoch": number}
+        )
+        callback.on_epoch_end(args, state, None)
+        if evaluate_after_epoch_end:
+            callback.on_evaluate(
+                args,
+                state,
+                None,
+                {"eval_loss": 1.5 / number, "eval_mean_iou": 0.1 * number, "eval_runtime": 3.0},
+            )
+    callback.on_train_end(args, trainer_state(float(epochs)), None)
+
+
+def test_huggingface_attaches_an_end_of_epoch_evaluation_to_its_epoch(huggingface_integration):
+    run = RecordingRun()
+    drive(huggingface_integration.VisinCallback(run), 2)
+    assert [e["epoch"] for e in run.epochs] == [1, 2]
+    first = run.epochs[0]
+    assert first["train"] == {"loss": 1.0, "grad_norm": 2.0}
+    assert first["val"] == {"loss": 1.5, "mean_iou": 0.1}
+    assert first["learning_rate"] == 0.1 and first["epoch_time"] >= 0
+    assert run.finished is None
+
+
+def test_huggingface_sends_the_last_epoch_when_training_ends(huggingface_integration):
+    run = RecordingRun()
+    drive(huggingface_integration.VisinCallback(run), 1, evaluate_after_epoch_end=False)
+    assert [e["epoch"] for e in run.epochs] == [1]
+    assert run.epochs[0]["val"] is None
+
+
+def test_huggingface_ignores_runtimes_and_throughput(huggingface_integration):
+    run = RecordingRun()
+    callback = huggingface_integration.VisinCallback(run)
+    args = types.SimpleNamespace()
+    callback.on_log(args, trainer_state(1.0), None, {"train_runtime": 9.0, "train_samples_per_second": 3.0})
+    callback.on_epoch_end(args, trainer_state(1.0), None)
+    callback.on_train_end(args, trainer_state(1.0), None)
+    assert run.epochs == []
+
+
+def test_huggingface_predict_metrics_become_a_test_result_on_the_last_epoch(huggingface_integration):
+    run = RecordingRun()
+    callback = huggingface_integration.VisinCallback(run)
+    drive(callback, 2)
+    callback.on_predict(None, trainer_state(2.0), None, {"test_loss": 0.3, "test_runtime": 1.0})
+    assert run.tests == [(2, {"overall": {"loss": 0.3}})]
+
+
+def test_huggingface_starts_logs_the_config_of_and_finishes_a_run_of_its_own(
+    huggingface_integration, monkeypatch
+):
+    run = RecordingRun()
+    started = {}
+    monkeypatch.setattr(huggingface_integration, "init", lambda **kwargs: started.update(kwargs) or run)
+    drive(huggingface_integration.VisinCallback(name="segformer"), 1)
+    assert started == {"name": "segformer"}
+    assert run.configs == [({"lr": 1e-3}, None)]
+    assert run.finished == "completed"
+
+
+def test_huggingface_only_reports_from_the_main_process(huggingface_integration, monkeypatch):
+    started = []
+    monkeypatch.setattr(huggingface_integration, "init", lambda **kwargs: started.append(1))
+    huggingface_integration.VisinCallback().on_train_begin(
+        None, types.SimpleNamespace(is_world_process_zero=False), None
+    )
+    assert started == []
+
+
+def test_lightning_does_not_report_a_stale_validation_on_an_epoch_that_did_not_validate(
+    lightning_integration,
+):
+    run = RecordingRun()
+    callback = lightning_integration.VisinCallback(run)
+    metrics = {"train_loss_epoch": 0.8, "val_loss": 0.9}
+    callback.on_validation_end(trainer(current_epoch=0, callback_metrics=metrics), None)
+    callback.on_train_epoch_end(trainer(current_epoch=0, callback_metrics=metrics), None)
+    callback.on_train_epoch_end(trainer(current_epoch=1, callback_metrics=metrics), None)
+    assert [(e["epoch"], e["val"]) for e in run.epochs] == [(1, {"loss": 0.9}), (2, None)]
+
+
+def test_lightning_ignores_the_sanity_check_validation(lightning_integration):
+    run = RecordingRun()
+    callback = lightning_integration.VisinCallback(run)
+    callback.on_validation_end(trainer(sanity_checking=True), None)
+    callback.on_train_epoch_end(trainer(callback_metrics={"train_loss": 1, "val_loss": 2}), None)
+    assert run.epochs[0]["val"] is None
+
+
+def test_lightning_test_alone_does_not_start_a_run(lightning_integration, monkeypatch):
+    monkeypatch.setattr(lightning_integration, "init", lambda **kwargs: pytest.fail("started a run"))
+    callback = lightning_integration.VisinCallback(name="segformer")
+    callback.setup(trainer(), types.SimpleNamespace(), "test")
+    callback.setup(trainer(), types.SimpleNamespace(), "validate")
+    assert callback.run is None
+
+
+def test_lightning_a_second_fit_starts_a_new_run(lightning_integration, monkeypatch):
+    runs = [RecordingRun(), RecordingRun()]
+    monkeypatch.setattr(lightning_integration, "init", lambda **kwargs: runs.pop(0))
+    callback = lightning_integration.VisinCallback(log_hyperparameters=False)
+    module = types.SimpleNamespace()
+    callback.setup(trainer(), module, "fit")
+    first = callback.run
+    callback.on_fit_end(trainer(), module)
+    callback.setup(trainer(), module, "test")
+    assert callback.run is first
+    callback.setup(trainer(), module, "fit")
+    assert callback.run is not first and first.finished == "completed"
+
+
+def test_keras_a_second_fit_starts_a_new_run(keras_integration, monkeypatch):
+    runs = [RecordingRun(), RecordingRun()]
+    monkeypatch.setattr(keras_integration, "init", lambda **kwargs: runs.pop(0))
+    callback = keras_integration.VisinCallback(name="unet")
+    for _ in range(2):
+        callback.on_train_begin()
+        callback.on_epoch_end(0, {"loss": 1})
+        callback.on_train_end()
+    assert runs == [] and callback.run is None
+
+
+def test_keras_initial_epoch_carries_on_the_numbering(keras_integration):
+    run = RecordingRun()
+    callback = keras_integration.VisinCallback(run)
+    callback.on_epoch_end(9, {"loss": 1})
+    assert run.epochs[0]["epoch"] == 10
+
+
+def test_huggingface_a_second_train_starts_a_new_run(huggingface_integration, monkeypatch):
+    runs = [RecordingRun(), RecordingRun()]
+    monkeypatch.setattr(huggingface_integration, "init", lambda **kwargs: runs.pop(0))
+    callback = huggingface_integration.VisinCallback(name="segformer")
+    drive(callback, 1)
+    drive(callback, 1)
+    assert runs == [] and callback.run is None

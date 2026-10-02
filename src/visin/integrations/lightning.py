@@ -10,6 +10,16 @@ Metrics logged with ``self.log`` arrive split by prefix: ``val_loss`` or
 training curve's. The module's hyperparameters become the run's config, and
 ``trainer.test`` metrics become a test result on the last epoch.
 Only global rank zero reports.
+
+Lightning keeps the last logged value of every metric, so the validation of an
+earlier epoch would be reported again on an epoch that did not validate (with
+``check_val_every_n_epoch=5``, say). The validation curve is therefore sent only
+on an epoch whose validation ran. The learning rate is the first optimizer's
+first parameter group's.
+
+A run started here is started by ``trainer.fit`` only: a ``trainer.test`` or
+``validate`` on its own does not make a run. Calling ``fit`` again, to resume,
+starts a new one.
 """
 
 from __future__ import annotations
@@ -68,10 +78,16 @@ class VisinCallback(Callback):  # type: ignore[misc]
         self._finish_after = finish_after
         self._log_hyperparameters = log_hyperparameters
         self._started: float | None = None
+        self._validated_epoch: int | None = None
+        self._finished = False
 
     def setup(self, trainer: Any, pl_module: Any, stage: str) -> None:
-        if self.run is not None or not trainer.is_global_zero:
+        if not trainer.is_global_zero or stage != "fit" or not self._owns_run:
             return
+        if self.run is not None and not self._finished:
+            return
+        self._finished = False
+        self._validated_epoch = None
         self.run = init(**self._init_kwargs)
         hparams = getattr(pl_module, "hparams", None)
         if self._log_hyperparameters and hparams:
@@ -86,6 +102,8 @@ class VisinCallback(Callback):  # type: ignore[misc]
         if self.run is None or trainer.sanity_checking or not trainer.is_global_zero:
             return
         groups = split_metrics(trainer.callback_metrics)
+        if self._validated_epoch != trainer.current_epoch:
+            groups.pop("val", None)
         if not groups.get("train") and not groups.get("val"):
             return
         self.run.log_epoch(
@@ -95,6 +113,10 @@ class VisinCallback(Callback):  # type: ignore[misc]
             learning_rate=_learning_rate(trainer),
             epoch_time=time.monotonic() - self._started if self._started is not None else None,
         )
+
+    def on_validation_end(self, trainer: Any, pl_module: Any) -> None:
+        if not trainer.sanity_checking:
+            self._validated_epoch = trainer.current_epoch
 
     def on_test_end(self, trainer: Any, pl_module: Any) -> None:
         if self.run is None or not trainer.is_global_zero:
@@ -118,5 +140,6 @@ class VisinCallback(Callback):  # type: ignore[misc]
             self.run.fail(exception)
 
     def _finish(self) -> None:
-        if self._owns_run and self.run is not None:
+        if self._owns_run and self.run is not None and not self._finished:
             self.run.finish()
+            self._finished = True

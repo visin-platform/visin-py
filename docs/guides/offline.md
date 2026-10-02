@@ -33,7 +33,7 @@ visualizations, is written under `~/.visin`. Afterwards, from a machine that can
 a cluster's login node, which usually shares your home directory:
 
 ```sh
-export VISIN_URL=https://vision-api.example.com VISIN_TOKEN=…
+export VISIN_URL=https://vision-api.visin.eu VISIN_TOKEN=…
 visin sync --list      # what is waiting
 visin sync             # send it
 ```
@@ -53,9 +53,13 @@ visin sync             # send it
   stays on disk. It is listed as refused, and can be sent again once the cause is fixed. `--drop-rejected`
   forgets such reports instead.
 
-!!! warning "One sync at a time"
-    Two `visin sync` commands over the same directory at the same time can deliver a benchmark or
-    config twice. A sync running alongside a training job is fine.
+!!! note "One sync at a time"
+    Two `visin sync` commands over the same directory cannot run together: the second stops with
+    "another visin sync, or a run catching up, is already sending …" (`visin.SyncInProgressError`
+    from Python) and sends nothing, since a benchmark or config sent twice would be stored twice. A
+    run that lost Visin and is catching up takes the same lock, and waits for its next try while a
+    sync holds it. A sync running alongside an offline training job is fine. On Windows there is no
+    such lock, so start only one sync at a time.
 
 ## From Python
 

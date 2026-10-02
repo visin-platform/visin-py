@@ -4,33 +4,27 @@ that makes it."""
 from __future__ import annotations
 
 import atexit
-import functools
 import logging
 import os
-import time
 import uuid as uuidlib
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
 from . import system as _system
-from ._internal.config import Settings, read_settings
+from ._internal.config import HOSTED_URL, Settings, read_settings
+from ._internal.delivery import Delivery
+from ._internal.images import encode_png, is_image
 from ._internal.inputs import as_mapping, default_name, epoch_number, merge_results, now
+from ._internal.payloads import benchmark_payload, run_payload, update_body
 from ._internal.process import ProcessHooks, rank
-from ._internal.reports import DeliveryContext, deliver, discard_staged
-from ._internal.sender import Sender
+from ._internal.reports import discard_staged
 from ._internal.serialize import to_jsonable
-from ._internal.spool import Spool, sync_spool
+from ._internal.spool import Spool
 from ._internal.transport import HttpClient, worth_retrying_later
 from .errors import ConfigurationError, VisinError
 
 logger = logging.getLogger("visin")
-
-# Server-side caps. The Zod schemas accept any string; the Mongoose model
-# rejects an over-long one, so an untruncated name fails as a 400 halfway
-# through a run rather than at the call that set it.
-MAX_NAME = 200
-MAX_DESCRIPTION = 1000
 
 STATUSES = ("pending", "running", "completed", "failed")
 
@@ -47,20 +41,6 @@ VISUALIZATION_TYPES = {
     ".mov": "video/quicktime",
     ".pdf": "application/pdf",
 }
-
-# The API refuses a benchmark whose system_info lacks any of these.
-BENCHMARK_SYSTEM_FIELDS = ("cpu_count", "cpu_count_logical", "memory_total_gb")
-
-# How long a run that lost the server waits before trying it again.
-CATCH_UP_INTERVAL = 60.0
-
-# Retries for the requests that make a caller wait. Creating the run blocks the
-# start of training, and a catch-up blocks every report queued behind it; both
-# fall back to keeping reports on disk, so a short budget loses nothing. With
-# the client's full budget, a server that drops packets rather than refusing
-# held init() for close to a minute.
-CREATE_RETRIES = 1
-CATCH_UP_RETRIES = 0
 
 # Fixed namespace, so the same (run, epoch) always names the same epoch on
 # every machine and in every process. This is what makes a retried POST
@@ -109,27 +89,20 @@ class Run:
         system_metrics: bool = False,
         name: str | None = None,
         mark_status: bool = True,
+        settings: Settings | None = None,
     ):
         self.training_uuid = training_uuid
+        self._settings = settings
         self.name = name
-        self._client = client
-        self._spool = spool
+        self._delivery = Delivery(client, spool, training_uuid)
         self._strict = strict
         self._system_metrics = system_metrics
         self._mark_status = mark_status
-        self._context = DeliveryContext(files=spool.files if spool else None)
         if training_id and training_uuid:
-            self._context.training_ids[training_uuid] = training_id
-        self._sender = Sender() if client else None
+            self._delivery.context.training_ids[training_uuid] = training_id
         self._finished = False
-        self._spooling = False
-        self._next_catch_up = 0.0
-        self._sent = 0
         self._warned_nonfinite = False
-        self._warned_repeat = False
         self._resumed: bool | None = None
-        # Epochs this process has delivered, to tell a retry from a re-log.
-        self._delivered_epochs: set[str] = set()
         self.last_epoch: int | float | None = None
         if self.mode != "disabled":
             ProcessHooks.install()
@@ -182,38 +155,17 @@ class Run:
             return cls._disabled(settings)
 
         run_uuid = training_uuid or settings.training_uuid or str(uuidlib.uuid4())
-        combined: dict[str, Any] = dict(metadata or {})
-        if model:
-            combined["model"] = model
-        if dataset:
-            combined["dataset"] = dataset
-        payload: dict[str, Any] = {
-            "uuid": run_uuid,
-            "name": full_name[:MAX_NAME],
-            "status": "running",
-            "startTime": now(),
-        }
-        if combined:
-            payload["metadata"] = combined
-        if dataset:
-            payload["datasetId"] = dataset
-        if settings.project:
-            payload["projectId"] = settings.project
-        if config_id:
-            payload["configId"] = config_id
-        if tags:
-            payload["tags"] = [tags] if isinstance(tags, str) else list(tags)
-        # Callers pass a config summary as the name often enough that
-        # truncating it would lose the only description of the run; keep the
-        # full text rather than dropping it.
-        if not description and len(full_name) > MAX_NAME:
-            description = full_name
-        if len(full_name) > MAX_NAME:
-            logger.warning("visin: run name truncated to %d characters", MAX_NAME)
-        if description:
-            if len(description) > MAX_DESCRIPTION:
-                logger.warning("visin: description truncated to %d characters", MAX_DESCRIPTION)
-            payload["description"] = description[:MAX_DESCRIPTION]
+        payload = run_payload(
+            run_uuid,
+            full_name,
+            project=settings.project,
+            dataset=dataset,
+            model=model,
+            config_id=config_id,
+            description=description,
+            tags=tags,
+            metadata=metadata,
+        )
 
         run = cls._build(settings, run_uuid, strict=strict, system_metrics=system_metrics, name=full_name)
         try:
@@ -254,15 +206,17 @@ class Run:
         """
         settings = read_settings(url=url, token=token, mode=mode, directory=directory)
         if settings.effective_mode == "disabled" or rank() != 0:
-            return cls._disabled(settings)
+            return _remember(cls._disabled(settings))
         training_uuid = training_uuid or settings.training_uuid
         if not training_uuid:
             raise ConfigurationError(
                 "no run to attach to: pass a training UUID or set VISIN_TRAINING_UUID. "
                 "Use visin.init(...) to register a run instead."
             )
-        return cls._build(
-            settings, training_uuid, strict=strict, system_metrics=system_metrics, mark_status=mark_status
+        return _remember(
+            cls._build(
+                settings, training_uuid, strict=strict, system_metrics=system_metrics, mark_status=mark_status
+            )
         )
 
     @classmethod
@@ -277,6 +231,14 @@ class Run:
         else:
             if settings.mode == "disabled":
                 logger.info("visin: VISIN_MODE=disabled, so reporting is off")
+            elif settings.token and not settings.url:
+                logger.warning(
+                    "visin: a token is set but VISIN_URL is not, so nothing is reported "
+                    "(hosted Visin: %s; or run `visin login`)",
+                    HOSTED_URL,
+                )
+            elif settings.url and not settings.token:
+                logger.warning("visin: VISIN_URL is set but VISIN_TOKEN is not, so nothing is reported")
             else:
                 logger.info("visin: VISIN_URL/VISIN_TOKEN unset, so reporting is disabled")
         return cls.disabled()
@@ -311,46 +273,48 @@ class Run:
             system_metrics=system_metrics,
             name=name,
             mark_status=mark_status,
+            settings=settings,
         )
 
     def _start(self, payload: dict[str, Any]) -> None:
         """Register the run, synchronously, so it exists before its first epoch."""
         op = {"op": "create_run", "body": payload}
-        if self._client is None:
-            assert self._spool is not None
-            self._spool.append(op)
+        delivery = self._delivery
+        if delivery.client is None:
+            delivery.keep(op)
+            assert delivery.spool is not None
             logger.info(
                 "visin: run %s is offline; reports are kept in %s for `visin sync`",
                 self.training_uuid,
-                self._spool.path,
+                delivery.spool.path,
             )
             return
         try:
-            self._context.retries = CREATE_RETRIES
-            try:
-                deliver(self._client, op, self._context)
-            finally:
-                self._context.retries = None
-            self._resumed = self.training_uuid in self._context.existing
+            delivery.register(op)
+            self._resumed = self.training_uuid in delivery.context.existing
             if self._resumed:
-                logger.info("visin: resumed run %s (%s)", payload["name"][:60], self.training_uuid)
+                logger.info(
+                    "visin: resumed run %s (%s) %s", payload["name"][:60], self.training_uuid, self.url or ""
+                )
                 # An earlier attempt may have left it completed or failed; it
                 # is running again, and should say so while it trains.
                 self._emit(
                     {"op": "update", "training_uuid": self.training_uuid, "body": {"status": "running"}}
                 )
             else:
-                logger.info("visin: created run %s (%s)", payload["name"][:60], self.training_uuid)
+                logger.info(
+                    "visin: created run %s (%s) %s", payload["name"][:60], self.training_uuid, self.url or ""
+                )
         except VisinError as exc:
-            if self._spool is not None and worth_retrying_later(exc):
-                self._spool.append(op)
-                self._start_spooling()
+            if delivery.spool is not None and worth_retrying_later(exc):
+                delivery.keep(op)
+                delivery.start_spooling()
                 logger.warning(
                     "visin: could not reach Visin to create run %s (%s); reports are kept in %s and "
                     "will be sent when it answers",
                     self.training_uuid,
                     exc,
-                    self._spool.path,
+                    delivery.spool.path,
                 )
                 return
             # Refused outright: a bad token, or a project the token does not
@@ -363,20 +327,17 @@ class Run:
     def _disable(self) -> None:
         logger.warning("visin: nothing more will be reported for run %s", self.training_uuid)
         atexit.unregister(self._at_exit)
-        self._client = None
-        self._spool = None
-        self._sender = None
+        if self._delivery.sender is not None:
+            self._delivery.sender.stop(timeout=5.0)
+        self._delivery.close()
+        self._delivery = Delivery(None, None, self.training_uuid)
 
     # ---------------------------------------------------------------- state
 
     @property
     def mode(self) -> str:
         """``online``, ``offline`` or ``disabled``: what this run is doing with its reports."""
-        if self._client is not None:
-            return "online"
-        if self._spool is not None:
-            return "offline"
-        return "disabled"
+        return self._delivery.mode
 
     @property
     def enabled(self) -> bool:
@@ -393,11 +354,20 @@ class Run:
         return self._resumed
 
     @property
+    def url(self) -> str | None:
+        """The run's page in Visin's web app, once the server has told us its id.
+
+        ``None`` for an offline or disabled run, or a deployment whose app address is not known:
+        set ``VISIN_APP_URL`` for one that is not the hosted Visin.
+        """
+        return self._settings.run_link(self.training_id) if self._settings else None
+
+    @property
     def training_id(self) -> str | None:
         """The run's database id, once the server has told us."""
         if not self.training_uuid:
             return None
-        return self._context.training_ids.get(self.training_uuid)
+        return self._delivery.context.training_ids.get(self.training_uuid)
 
     def epoch_uuid(self, epoch: int | float) -> str | None:
         """The UUID this run's ``epoch`` has, whether or not it is sent yet."""
@@ -421,6 +391,9 @@ class Run:
         system: bool | None = None,
     ) -> str | None:
         """Record one epoch. Returns its UUID, which is known before it is sent.
+
+        Returns ``None`` when the report was not taken: the run is disabled or
+        finished, the results were refused, or the queue was full.
 
         ``results`` is passed through as given: Visin finds whatever a run chose
         to measure rather than requiring it to be declared. ``train`` and
@@ -459,8 +432,7 @@ class Run:
             self._handle(exc, "log epoch")
             return None
         self.last_epoch = number
-        self._emit({"op": "epoch", "body": body})
-        return ep_uuid
+        return ep_uuid if self._emit({"op": "epoch", "body": body}) else None
 
     def log_test_results(
         self,
@@ -504,8 +476,7 @@ class Run:
         except (TypeError, ValueError) as exc:
             self._handle(exc, "log test results")
             return None
-        self._emit({"op": "test_result", "body": body})
-        return test_uuid
+        return test_uuid if self._emit({"op": "test_result", "body": body}) else None
 
     def log_benchmark(
         self,
@@ -528,29 +499,15 @@ class Run:
         if not self._accepting():
             return
         try:
-            rows = [dict(results)] if isinstance(results, Mapping) else [dict(row) for row in results]
-            info = dict(system_info or {})
-            if any(field not in info for field in BENCHMARK_SYSTEM_FIELDS):
-                info = {**_system.system_info(), **info}
-            payload: dict[str, Any] = {
-                "timestamp": timestamp or now(),
-                "system_info": info,
-                "results": rows,
-            }
-            # An explicit epoch UUID names the run too: the server finds it
-            # through the epoch. Naming this run as well can only disagree,
-            # which the server refuses as conflicting parents.
-            if self.training_uuid and not epoch_uuid:
-                payload["training_uuid"] = self.training_uuid
-            if epoch is not None:
-                number = epoch_number(epoch)
-                payload["epoch"] = number
-                if epoch_uuid:
-                    payload["epoch_uuid"] = epoch_uuid
-                elif self.training_uuid:
-                    payload["epoch_uuid"] = epoch_uuid_for(self.training_uuid, number)
-            elif epoch_uuid:
-                payload["epoch_uuid"] = epoch_uuid
+            payload = benchmark_payload(
+                results,
+                system_info,
+                training_uuid=self.training_uuid,
+                epoch=epoch,
+                epoch_uuid=epoch_uuid,
+                name_epoch=epoch_uuid_for,
+                timestamp=timestamp,
+            )
             body = self._jsonable(payload, "benchmark")
         except (TypeError, ValueError) as exc:
             self._handle(exc, "log benchmark")
@@ -588,9 +545,10 @@ class Run:
     def upload_visualization(
         self,
         epoch: int | float,
-        path: str | os.PathLike[str],
+        path: Any,
         kind: str = "prediction",
         *,
+        name: str | None = None,
         metadata: Mapping[str, Any] | None = None,
         mimetype: str | None = None,
         epoch_uuid: str | None = None,
@@ -598,42 +556,72 @@ class Run:
         """Store a rendered frame against an epoch: a prediction overlay, a
         segmentation map, a ground-truth comparison.
 
+        ``path`` is a file, or an image held in memory: a NumPy array or PyTorch
+        tensor (``HxW``, ``HxWx3``, ``HxWx4``, or channels first), a PIL image, or
+        a Matplotlib figure. An image is stored as PNG under ``name``, by default
+        ``<kind>.png``.
+
         ``kind`` is your own name for what it shows; the Visualizations tab
         filters by it, and by file name, so render the same inputs under the
-        same names each time. The file is copied at the call, so it may be
-        overwritten straight after. ``epoch_uuid`` names the epoch directly,
+        same names each time. The file or image is copied at the call, so it may
+        be overwritten straight after. ``epoch_uuid`` names the epoch directly,
         as for :meth:`log_test_results`.
         """
         if not self._accepting() or not self.training_uuid:
             return
-        source = os.fspath(path)
-        extension = os.path.splitext(source)[1].lower()
-        content_type = mimetype or VISUALIZATION_TYPES.get(extension)
+        op: dict[str, Any] | None = None
         try:
-            if not os.path.isfile(source):
-                raise ConfigurationError(f"no such file: {source}")
-            if content_type is None:
-                raise ConfigurationError(
-                    "Visin stores PNG, JPEG, GIF, WebP, MP4, MOV and PDF files, "
-                    f"not {extension or 'a file without an extension'}: {source}"
-                )
+            filename, content_type, op = self._visualization_source(path, kind, name, mimetype)
             body: dict[str, Any] = {
                 "epoch_uuid": epoch_uuid or epoch_uuid_for(self.training_uuid, epoch_number(epoch)),
-                "filename": os.path.basename(source),
+                "filename": filename,
                 "type": kind,
                 "mimetype": content_type,
             }
             if metadata:
                 body["metadata"] = dict(metadata)
-            op: dict[str, Any] = {"op": "visualization", "body": self._jsonable(body, "visualization")}
-            if self._spool is not None:
-                op["staged"] = self._spool.stage(source)
-            else:
-                op["path"] = os.path.abspath(source)
-        except (ConfigurationError, OSError, TypeError, ValueError) as exc:
+            op["body"] = self._jsonable(body, "visualization")
+        except (ConfigurationError, OSError, TypeError, ValueError, ImportError) as exc:
+            if op is not None:
+                discard_staged(op, self._delivery.context)
             self._handle(exc, "upload visualization")
             return
         self._emit(op)
+
+    def _visualization_source(
+        self, path: Any, kind: str, name: str | None, mimetype: str | None
+    ) -> tuple[str, str, dict[str, Any]]:
+        """The file name, type and op (without its body) for what ``upload_visualization`` was given."""
+        spool = self._delivery.spool
+        if is_image(path):
+            if spool is None:
+                raise ConfigurationError(
+                    "an image in memory needs disk to be kept on: save it to a file instead"
+                )
+            filename = name or f"{kind}.png"
+            if not filename.lower().endswith(".png"):
+                filename += ".png"
+            return (
+                filename,
+                "image/png",
+                {"op": "visualization", "staged": spool.stage_bytes(encode_png(path), filename)},
+            )
+        source = os.fspath(path)
+        extension = os.path.splitext(source)[1].lower()
+        content_type = mimetype or VISUALIZATION_TYPES.get(extension)
+        if not os.path.isfile(source):
+            raise ConfigurationError(f"no such file: {source}")
+        if content_type is None:
+            raise ConfigurationError(
+                "Visin stores PNG, JPEG, GIF, WebP, MP4, MOV and PDF files, "
+                f"not {extension or 'a file without an extension'}: {source}"
+            )
+        op: dict[str, Any] = {"op": "visualization"}
+        if spool is not None:
+            op["staged"] = spool.stage(source)
+        else:
+            op["path"] = os.path.abspath(source)
+        return name or os.path.basename(source), content_type, op
 
     def update(
         self,
@@ -649,18 +637,9 @@ class Run:
         """
         if not self._accepting() or not self.training_uuid:
             return
-        body: dict[str, Any] = {}
+        body = update_body(name=name, description=description, tags=tags, metadata=metadata)
         if name is not None and name.strip():
-            body["name"] = name.strip()[:MAX_NAME]
             self.name = name.strip()
-        if description is not None:
-            if len(description) > MAX_DESCRIPTION:
-                logger.warning("visin: description truncated to %d characters", MAX_DESCRIPTION)
-            body["description"] = description[:MAX_DESCRIPTION]
-        if tags is not None:
-            body["tags"] = [tags] if isinstance(tags, str) else list(tags)
-        if metadata is not None:
-            body["metadata"] = dict(metadata)
         if not body:
             return
         try:
@@ -694,104 +673,32 @@ class Run:
             )
         return body
 
-    def _emit(self, op: dict[str, Any]) -> None:
-        if self._client is not None:
-            assert self._sender is not None
-            # A partial, not a lambda: a stop that cannot wait hands queued work
-            # back, and its op has to be readable to be kept on disk.
-            if not self._sender.submit(functools.partial(self._send, op)):
-                discard_staged(op, self._context)
-        elif self._spool is not None:
-            try:
-                self._spool.append(op)
-            except OSError as exc:
-                self._handle(exc, f"keep {op['op']} on disk")
-
-    def _send(self, op: dict[str, Any]) -> None:
-        """Deliver one op. Runs on the reporter thread."""
-        assert self._client is not None
-        if self._spooling and not self._catch_up():
-            self._keep(op)
-            return
+    def _emit(self, op: dict[str, Any]) -> bool:
         try:
-            deliver(self._client, op, self._context)
-        except VisinError as exc:
-            if self._spool is not None and worth_retrying_later(exc):
-                if not self._spooling:
-                    logger.warning(
-                        "visin: lost Visin (%s); keeping reports in %s until it answers",
-                        exc,
-                        self._spool.path,
-                    )
-                self._keep(op)
-                self._start_spooling()
-                return
-            discard_staged(op, self._context)
-            raise
-        discard_staged(op, self._context)
-        self._sent += 1
-        if op.get("op") == "epoch":
-            self._note_epoch(str(op["body"].get("epoch_uuid")), op["body"].get("epoch"))
-
-    def _note_epoch(self, epoch_uuid: str, epoch: Any) -> None:
-        """Say so, once, when an epoch was recorded before and the new copy dropped."""
-        if epoch_uuid in self._context.repeated:
-            self._context.repeated.discard(epoch_uuid)
-            if epoch_uuid not in self._delivered_epochs and not self._warned_repeat:
-                self._warned_repeat = True
-                logger.warning(
-                    "visin: epoch %s of run %s was already recorded, by an earlier attempt or an earlier "
-                    "run of this script, and Visin keeps the first copy. A job that restarts its epoch "
-                    "numbering should start a new run.",
-                    epoch,
-                    self.training_uuid,
-                )
-        self._delivered_epochs.add(epoch_uuid)
-
-    def _keep(self, op: dict[str, Any]) -> None:
-        assert self._spool is not None
-        self._spool.append(op)
-
-    def _start_spooling(self) -> None:
-        self._spooling = True
-        self._next_catch_up = time.monotonic() + CATCH_UP_INTERVAL
-
-    def _catch_up(self, force: bool = False) -> bool:
-        """Send what was kept while Visin was away. True once nothing is left."""
-        assert self._client is not None
-        assert self._spool is not None
-        if not force and time.monotonic() < self._next_catch_up:
+            return self._delivery.emit(op)
+        except OSError as exc:
+            self._handle(exc, f"keep {op['op']} on disk")
             return False
-        self._context.retries = CATCH_UP_RETRIES
-        try:
-            result = sync_spool(self._client, self._spool, drop_rejected=True, context=self._context)
-        finally:
-            self._context.retries = None
-        self._sent += result.sent
-        for message in result.rejected:
-            logger.warning("visin: Visin refused a kept report: %s", message)
-        if result.remaining == 0:
-            if self._spooling:
-                logger.info("visin: Visin answers again; sent %d kept reports", result.sent)
-            self._spooling = False
-            return True
-        self._next_catch_up = time.monotonic() + CATCH_UP_INTERVAL
-        return False
 
     # ---------------------------------------------------------------- lifecycle
 
     def flush(self, timeout: float = 30.0) -> bool:
         """Wait until every report made so far has been attempted."""
-        return self._sender.flush(timeout) if self._sender else True
+        return self._delivery.flush(timeout)
 
     def finish(self, status: str = "completed", *, timeout: float = 60.0) -> None:
-        """Send what is left and mark the run finished. Safe to call twice."""
+        """Send what is left and mark the run finished. Safe to call twice.
+
+        A ``status`` that is not one of ``pending``, ``running``, ``completed``
+        or ``failed`` is reported and the run is marked failed: a run that
+        ended on a mistake has not shown that it completed.
+        """
         if self._finished or self.mode == "disabled":
             self._finished = True
             return
         if status not in STATUSES:
             self._handle(ValueError(f"status must be one of {', '.join(STATUSES)}, not {status!r}"), "finish")
-            status = "completed"
+            status = "failed"
         assert self.training_uuid
         if self._mark_status:
             self._emit(
@@ -801,78 +708,18 @@ class Run:
                     "body": {"status": status, "endTime": now()},
                 }
             )
-        else:
-            status = "done"  # for the summary: the run's own status is not ours to set
         self._finished = True
         atexit.unregister(self._at_exit)
 
-        flushed = True
-        if self._sender is not None:
-            flushed = self._sender.stop(timeout)
-            self._keep_leftovers()
-            if flushed and self._spooling:
-                # One last try before the process goes away.
-                try:
-                    self._catch_up(force=True)
-                except Exception as exc:
-                    logger.warning("visin: could not send kept reports: %s", exc)
-        self._summarise(status, flushed)
-        if self._client is not None:
-            self._client.close()
-
-    def _keep_leftovers(self) -> None:
-        """Keep on disk what a timed-out finish could not wait to send."""
-        assert self._sender is not None
-        leftover = [
-            item.args[0]
-            for item in self._sender.leftover
-            if isinstance(item, functools.partial) and item.args
-        ]
-        self._sender.leftover = []
-        if not leftover:
-            return
-        if self._spool is None:
-            self._sender.dropped += len(leftover)
-            return
-        for op in leftover:
-            try:
-                self._spool.append(op)
-            except OSError as exc:
-                self._sender.dropped += 1
-                logger.warning("visin: could not keep a report on disk: %s", exc)
+        flushed = self._delivery.stop(timeout)
+        self._delivery.summarise(status if self._mark_status else "done", flushed)
+        self._delivery.close()
 
     def fail(self, error: BaseException | str | None = None) -> None:
         """Mark the run failed, keeping whatever it already reported."""
         if error and self.enabled:
             logger.warning("visin: run failed: %s", error)
         self.finish(status="failed")
-
-    def _summarise(self, status: str, flushed: bool) -> None:
-        waiting = self._spool.count() if self._spool else 0
-        if self.mode == "offline":
-            logger.warning(
-                "visin: run %s %s offline; %d reports kept in %s. Send them with `visin sync`.",
-                self.training_uuid,
-                status,
-                waiting,
-                self._spool.path if self._spool else "-",
-            )
-            return
-        failed = self._sender.failed if self._sender else 0
-        dropped = self._sender.dropped if self._sender else 0
-        if waiting or failed or dropped or not flushed:
-            logger.warning(
-                "visin: run %s %s: %d reports sent, %d failed, %d dropped, %d waiting on disk%s",
-                self.training_uuid,
-                status,
-                self._sent,
-                failed,
-                dropped,
-                waiting,
-                "; send them with `visin sync`" if waiting else "",
-            )
-        else:
-            logger.info("visin: run %s %s, %d reports sent", self.training_uuid, status, self._sent)
 
     def _at_exit(self) -> None:
         # Reached when the process ends without finish(): a script that just
@@ -909,6 +756,24 @@ class Run:
         return f"<visin.Run {self.training_uuid or '-'} {state}>"
 
 
+_current: list[Run] = []
+
+
+def get_run() -> Run:
+    """The run most recently made by :func:`init` or :meth:`Run.attach` in this process.
+
+    A disabled run when there is none, so code that logs through it still runs
+    where nothing was started. A finished run is returned as it is, and warns
+    when it is used, which is more use than silence.
+    """
+    return _current[-1] if _current else Run.disabled()
+
+
+def _remember(run: Run) -> Run:
+    _current[:] = [run]
+    return run
+
+
 def init(
     name: str | None = None,
     *,
@@ -936,20 +801,22 @@ def init(
     ``VISIN_TRAINING_UUID``) naming a run that exists, that run is resumed.
     To report into a run without registering it, use :meth:`Run.attach`.
     """
-    return Run.create(
-        name or default_name(),
-        project=project,
-        dataset=dataset,
-        model=model,
-        config=config,
-        description=description,
-        tags=tags,
-        metadata=metadata,
-        training_uuid=training_uuid,
-        url=url,
-        token=token,
-        mode=mode,
-        directory=directory,
-        strict=strict,
-        system_metrics=system_metrics,
+    return _remember(
+        Run.create(
+            name or default_name(),
+            project=project,
+            dataset=dataset,
+            model=model,
+            config=config,
+            description=description,
+            tags=tags,
+            metadata=metadata,
+            training_uuid=training_uuid,
+            url=url,
+            token=token,
+            mode=mode,
+            directory=directory,
+            strict=strict,
+            system_metrics=system_metrics,
+        )
     )

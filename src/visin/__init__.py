@@ -15,17 +15,28 @@ from ._internal.config import Settings, read_settings
 from ._internal.console import enable_console_logging
 from ._version import __version__
 from .api import Api, flatten
-from .datasets import Datasets
-from .errors import ApiError, ConfigurationError, TransportError, VisinError
-from .models import Benchmark, Dataset, Epoch, Project, TestResult, Training
+from .datasets import CachedDataset, Datasets, cached_datasets, remove_cached
+from .errors import ApiError, ConfigurationError, SyncInProgressError, TransportError, VisinError
+from .models import Benchmark, Configuration, Dataset, Epoch, Project, TestResult, Training, Visualization
 from .offline import SyncResult, pending, sync
-from .run import Run, epoch_uuid_for, init
+from .run import Run, epoch_uuid_for, get_run, init
+from .shortcuts import (
+    finish,
+    log_benchmark,
+    log_config,
+    log_epoch,
+    log_test_results,
+    update,
+    upload_visualization,
+)
 from .system import system_info, system_metrics
 
 __all__ = [
     "Api",
     "ApiError",
     "Benchmark",
+    "CachedDataset",
+    "Configuration",
     "ConfigurationError",
     "Dataset",
     "Datasets",
@@ -33,19 +44,31 @@ __all__ = [
     "Project",
     "Run",
     "Settings",
+    "SyncInProgressError",
     "SyncResult",
     "TestResult",
     "Training",
     "TransportError",
     "VisinError",
+    "Visualization",
     "__version__",
+    "cached_datasets",
     "enable_console_logging",
     "epoch_uuid_for",
+    "finish",
     "flatten",
+    "get_run",
     "init",
+    "log_benchmark",
+    "log_config",
+    "log_epoch",
+    "log_test_results",
     "pending",
     "read_settings",
+    "remove_cached",
     "sync",
     "system_info",
     "system_metrics",
+    "update",
+    "upload_visualization",
 ]
