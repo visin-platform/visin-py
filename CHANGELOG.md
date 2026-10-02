@@ -10,13 +10,24 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-02
+
+### Added
+
+- add visin login, run links, in-memory frames and more Api reads
+
+### Fixed
+
+- the sync lock works on Windows too
+
+[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/visin-platform/visin-py/compare/v0.5.0...v0.6.0
 ## [0.5.0] - 2026-10-01
 
 ### Added
 
 - add unzip and keep archive as download options
 
-[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/visin-platform/visin-py/compare/v0.4.0...v0.5.0
 ## [0.4.0] - 2026-10-01
 
