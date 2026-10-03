@@ -79,7 +79,7 @@ def body_schema(operation, spec):
 
 
 @pytest.fixture
-def recorded(server, session, uploads, tmp_path, monkeypatch):
+def recorded(server, session, uploads, tmp_path, monkeypatch, hf):
     """Drive every public entry point once and return what was sent."""
     session.route(
         "POST",
@@ -94,7 +94,10 @@ def recorded(server, session, uploads, tmp_path, monkeypatch):
     )
     frame = tmp_path / "overlay.png"
     frame.write_bytes(b"\x89PNG")
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"weights")
 
+    monkeypatch.setenv("VISIN_PROVENANCE", "1")
     with visin.init(
         "contract run",
         project="road-seg",
@@ -111,6 +114,7 @@ def recorded(server, session, uploads, tmp_path, monkeypatch):
         run.log_test_results(1, {"day": {"overall": {"iou": 0.5}}})
         run.log_benchmark({"device": "cpu", "fps": 1.0}, epoch=1)
         run.upload_visualization(1, frame, "overlay", metadata={"sample": 1})
+        run.log_model(checkpoint, "acme/clft", epoch=1)
         run.update(tags=["done"], name="renamed", description="d", metadata={"best": 1})
 
     monkeypatch.setenv("VISIN_MODE", "offline")
@@ -132,6 +136,9 @@ def recorded(server, session, uploads, tmp_path, monkeypatch):
     api.find("n", project="road-seg")
     api.tags()
     api.config(run)
+    api.summary(run)
+    list(api.comparisons(project="road-seg", type="trainings", limit=1))
+    list(api.findings(project="road-seg", limit=1))
     api.visualizations(run, kind="overlay")
 
     monkeypatch.setenv("VISIN_TOKEN", "vsn_live_contract")
@@ -181,6 +188,7 @@ def test_every_body_satisfies_its_schema_and_sends_nothing_the_server_would_stri
         "POST /configs/upload",
         "POST /visualizations/upload-url",
         "POST /visualizations",
+        "POST /trainings/{id}/models",
     ):
         assert operation in checked, f"{operation} was never exercised"
 
@@ -188,3 +196,36 @@ def test_every_body_satisfies_its_schema_and_sends_nothing_the_server_would_stri
 def test_config_upload_inherits_the_training_project(recorded):
     configs = [call["json"] for call in recorded if call["url"].endswith("/configs/upload")]
     assert configs and all(body["projectId"] == "0123456789abcdef01234569" for body in configs)
+
+
+def test_collected_provenance_stays_within_the_platform_request_limits(spec, monkeypatch, tmp_path):
+    import sys
+    import types
+
+    from visin._internal import provenance
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["train.py", "--token", "secret-value", "x" * 5000])
+    git = {
+        ("rev-parse", "HEAD"): "a" * 40,
+        ("rev-parse", "--abbrev-ref", "HEAD"): "b" * 300,
+        ("status", "--porcelain"): "",
+        ("config", "--get", "remote.origin.url"): "https://token@host/" + "r" * 600,
+    }
+    monkeypatch.setattr(provenance, "_git", lambda directory, *args: git.get(args))
+    monkeypatch.setattr(provenance.socket, "gethostname", lambda: "h" * 300)
+    monkeypatch.setattr(provenance.platform, "platform", lambda: "p" * 300)
+    monkeypatch.setattr(provenance.platform, "python_version", lambda: "v" * 110)
+    distributions = [
+        types.SimpleNamespace(metadata={"Name": name}, version=version)
+        for name, version in [("requests", "2.0"), ("n" * 101, "1"), ("custom", "v" * 101)]
+    ]
+    monkeypatch.setattr(provenance.metadata, "distributions", lambda: distributions)
+    collected = provenance.collect()
+    assert "secret-value" not in collected["command"]
+    assert "token@" not in collected["git"]["remote"]
+    assert collected["packages"] == {"requests": "2.0"}
+    _, operation = find_operation(spec, "POST", "/trainings")
+    jsonschema.Draft202012Validator(body_schema(operation, spec)).validate(
+        {"name": "Run", "provenance": collected}
+    )

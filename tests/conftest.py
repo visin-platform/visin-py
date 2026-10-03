@@ -1,9 +1,10 @@
 """Fixtures every test shares. The fakes themselves are in ``fakes.py``."""
 
 import os
+import sys
 
 import pytest
-from fakes import BASE, FakeAtexit, FakeSession, FakeUploads
+from fakes import BASE, FakeAtexit, FakeHub, FakeSession, FakeUploads
 
 import visin._internal.process
 import visin.run
@@ -17,6 +18,7 @@ def isolated(monkeypatch, tmp_path):
     for name in list(os.environ):
         if name.startswith("VISIN_") or name in ("RANK", "SLURM_PROCID", "OMPI_COMM_WORLD_RANK", "PMI_RANK"):
             monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("VISIN_PROVENANCE", "0")
     monkeypatch.setenv("VISIN_DIR", str(tmp_path / "visin-dir"))
     monkeypatch.setenv("VISIN_CONFIG", str(tmp_path / "config-dir" / "config"))
     monkeypatch.setattr(visin._internal.process.ProcessHooks, "install", classmethod(lambda cls: None))
@@ -61,3 +63,11 @@ def server(monkeypatch, client):
     monkeypatch.setattr("visin.cli.HttpClient", factory)
     monkeypatch.setattr("visin.api.HttpClient", factory)
     return client
+
+
+@pytest.fixture
+def hf(monkeypatch):
+    """A fake ``huggingface_hub``, installed as if the ``visin[hf]`` extra were."""
+    hub = FakeHub()
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    return hub

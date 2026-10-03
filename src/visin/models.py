@@ -37,9 +37,24 @@ class Project:
     slug: str | None = None
     description: str | None = None
     visibility: str | None = None
+    taxonomy: dict[str, Any] = field(default_factory=dict)
     created_at: str | None = None
     updated_at: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    def direction(self, metric: str) -> str | None:
+        """``higher`` or ``lower``: which way is better for a result, as the project says, else ``None``.
+
+        ``metric`` is a path such as ``val.mean_iou``; the project names a result by that path or by its
+        last part. ``None`` means the project has not said, so any direction you assume is a guess.
+        """
+        leaf = metric.rsplit(".", 1)[-1]
+        metrics = self.taxonomy.get("metrics") or ()
+        for key in (metric, leaf):
+            for item in metrics:
+                if isinstance(item, Mapping) and item.get("key") == key and item.get("direction"):
+                    return str(item["direction"])
+        return None
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> Project:
@@ -50,6 +65,73 @@ class Project:
             slug=_str(data.get("slug")),
             description=_str(data.get("description")),
             visibility=_str(data.get("visibility")),
+            taxonomy=_dict(data.get("taxonomy")),
+            created_at=_str(data.get("createdAt")),
+            updated_at=_str(data.get("updatedAt")),
+            raw=dict(data),
+        )
+
+
+@dataclass(frozen=True)
+class Finding:
+    """A conclusion someone (or an assistant) recorded about a project's runs."""
+
+    id: str
+    project_id: str
+    title: str
+    body: str
+    recommendations: str | None = None
+    training_id: str | None = None
+    training_ids: tuple[str, ...] = ()
+    author_kind: str | None = None
+    author_label: str | None = None
+    created_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Finding:
+        """The Finding the server described in ``data``."""
+        return cls(
+            id=str(_pick(data, "_id", "id") or ""),
+            project_id=str(data.get("projectId") or ""),
+            title=str(data.get("title") or ""),
+            body=str(data.get("body") or ""),
+            recommendations=_str(data.get("recommendations")),
+            training_id=_str(data.get("trainingId")),
+            training_ids=tuple(str(item) for item in data.get("trainingIds") or ()),
+            author_kind=_str(data.get("authorKind")),
+            author_label=_str(data.get("authorLabel")),
+            created_at=_str(data.get("createdAt")),
+            raw=dict(data),
+        )
+
+
+@dataclass(frozen=True)
+class Comparison:
+    """A saved comparison of runs, test results, benchmarks or epochs."""
+
+    id: str
+    uuid: str
+    name: str
+    type: str | None = None
+    description: str | None = None
+    item_ids: tuple[str, ...] = ()
+    project_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Comparison:
+        """The Comparison the server described in ``data``."""
+        return cls(
+            id=str(_pick(data, "_id", "id") or ""),
+            uuid=str(data.get("uuid") or ""),
+            name=str(data.get("name") or ""),
+            type=_str(data.get("type")),
+            description=_str(data.get("description")),
+            item_ids=tuple(str(item) for item in data.get("itemIds") or ()),
+            project_id=_str(data.get("projectId")),
             created_at=_str(data.get("createdAt")),
             updated_at=_str(data.get("updatedAt")),
             raw=dict(data),
@@ -75,6 +157,9 @@ class Training:
     created_at: str | None = None
     updated_at: str | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
+    models: tuple[dict[str, Any], ...] = ()
+    provenance: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -96,6 +181,72 @@ class Training:
             created_at=_str(data.get("createdAt")),
             updated_at=_str(data.get("updatedAt")),
             metrics=_dict(data.get("metrics")),
+            models=tuple(_dict(model) for model in data.get("models") or ()),
+            provenance=_dict(data.get("provenance")),
+            notes=_str(data.get("notes")),
+            raw=dict(data),
+        )
+
+
+@dataclass(frozen=True)
+class MetricSummary:
+    """One result of a run: its path in an epoch, which way is better, and the best epoch beside the last.
+
+    ``direction_from`` is ``taxonomy`` when the project said which way is better, and ``default`` when Visin
+    guessed from the name (a loss or a latency is lower-is-better, the rest higher): check it before trusting
+    a guess.
+    """
+
+    path: str
+    direction: str
+    direction_from: str
+    best_value: float
+    best_epoch: int
+    last_value: float
+    last_epoch: int
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> MetricSummary:
+        """The MetricSummary the server described in ``data``."""
+        best, last = _dict(data.get("best")), _dict(data.get("last"))
+        return cls(
+            path=str(data.get("path") or ""),
+            direction=str(data.get("direction") or "higher"),
+            direction_from=str(data.get("directionFrom") or "default"),
+            best_value=float(best.get("value", 0.0)),
+            best_epoch=int(best.get("epoch", 0)),
+            last_value=float(last.get("value", 0.0)),
+            last_epoch=int(last.get("epoch", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class Summary:
+    """How a run did, in one call: the run, its models and provenance, and the best epoch of every result."""
+
+    training: Training
+    epoch_count: int
+    last_epoch: int | None
+    metrics: tuple[MetricSummary, ...] = ()
+    models: tuple[dict[str, Any], ...] = ()
+    provenance: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    def metric(self, path: str) -> MetricSummary | None:
+        """The summary of one result by path (such as ``val.mean_iou``), or ``None`` if never reported."""
+        return next((metric for metric in self.metrics if metric.path == path), None)
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Summary:
+        """The Summary the server described in ``data``."""
+        last_epoch = data.get("lastEpoch")
+        return cls(
+            training=Training.from_json(_dict(data.get("training"))),
+            epoch_count=int(data.get("epochCount") or 0),
+            last_epoch=None if last_epoch is None else int(last_epoch),
+            metrics=tuple(MetricSummary.from_json(_dict(item)) for item in data.get("metrics") or ()),
+            models=tuple(_dict(model) for model in data.get("models") or ()),
+            provenance=_dict(data.get("provenance")),
             raw=dict(data),
         )
 
@@ -247,9 +398,15 @@ class Dataset:
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
+    def source(self) -> dict[str, Any] | None:
+        """The Hugging Face repo and commit this dataset lives at, when it is kept there."""
+        source = _dict(self.raw.get("source"))
+        return source if source.get("repo") and source.get("revision") else None
+
+    @property
     def downloadable(self) -> bool:
-        """Whether Visin holds a zip of this dataset to download."""
-        return bool(self.id and self.raw.get("archive"))
+        """Whether there is something to download: a zip on Visin, or a Hub repo."""
+        return bool(self.id and (self.raw.get("archive") or self.source))
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> Dataset:

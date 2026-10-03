@@ -44,6 +44,44 @@ returns at once.
 4. Unpacks it into `<data dir>/<name>-<id>/`, refusing any entry that would land outside that folder,
    marks the folder complete and removes the ZIP.
 
+## Datasets on Hugging Face
+
+A dataset can live on the Hugging Face Hub instead of, or as well as, a ZIP on Visin. Visin then
+stores only a pointer: the repo and one commit, so a run from last year still names the same data.
+`download` fetches it from the Hub, at that commit, into the same folder layout and with the same
+completeness marker, so a config that says `"dataset_root": "visin:zod"` keeps working.
+
+```bash
+pip install 'visin[hf]'
+export HF_TOKEN=hf_...          # only for a private or gated repo
+visin download zod
+```
+
+- The Hub is preferred when the dataset has a ZIP too. If the Hub cannot be reached, or the extra is
+  not installed, the ZIP is used instead and the folder records that version.
+- A dataset on the Hub alone has no ZIP: `--no-unzip` and `--keep-archive` refuse it.
+- Pointing the dataset at a new commit on its Visin page is a new version: the next `download` fetches it.
+- Your token is read by `huggingface_hub` itself. This package never sends it to Visin.
+
+### Publishing a dataset to the Hub
+
+```bash
+visin push zod --repo acme/zod-png            # a new repo is private; add --public to open it
+```
+
+```python
+commit = datasets.push("zod", "acme/zod-png")
+```
+
+Downloads the dataset if it is not here yet, uploads its folder to the Hub dataset repo (created when it
+does not exist) with your own Hub token, then tells Visin the repo and the commit that upload made. From
+then on `download` fetches it from the Hub, and the ZIP on Visin stays as the fallback. You need to be
+able to manage the dataset on Visin, and `pip install 'visin[hf]'`.
+
+Publish only data whose licence allows redistribution, and never images of people without consent: a
+public Hub repo is public. If the upload works but Visin refuses the link, the message names the commit
+so you can set it on the dataset's page.
+
 ## Seeing and freeing the space
 
 ```bash
@@ -81,3 +119,10 @@ with Datasets() as datasets:
 - `keep_archive=True` on an already unpacked dataset fetches the missing ZIP without unpacking again.
 - The ZIP is deleted only after a successful unpack. If deleting it fails, a warning is logged and
   the dataset folder is still returned.
+
+The dataset marker records the revision and size returned with the signed download URL. If the
+archive is replaced after the metadata lookup, the cache and marker use the archive actually
+downloaded. Servers that omit these fields continue to use the dataset metadata.
+
+Invalid cache markers trigger a fresh download and extraction. Archive filenames are reduced to
+a basename before saving, so an uploaded filename cannot place the ZIP outside the cache.

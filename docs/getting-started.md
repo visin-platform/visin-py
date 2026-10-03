@@ -14,6 +14,7 @@ Optional extras:
 | --- | --- |
 | `visin[system]` | `psutil`, for more accurate CPU and memory figures in benchmarks and the System tab |
 | `visin[pandas]` | `pandas`, for `Api.epochs_frame` |
+| `visin[hf]` | `huggingface_hub`, for Hub datasets in `Datasets.download` and `Run.log_model` |
 
 ## 2. Get a token
 

@@ -121,6 +121,31 @@ extra package is needed for arrays and tensors; PIL images and figures are saved
 libraries. The name defaults to `<kind>.png`, so give each frame its own when you log several per
 epoch.
 
+## Checkpoints on Hugging Face
+
+```python
+run.log_model("checkpoints/best.pt", "acme/clftv2-zod", epoch=12)
+```
+
+Uploads the file (or folder) to the Hub model repo and links it to the run. Visin keeps only a pointer
+to the commit that upload made, shown on the run as `acme/clftv2-zod @ 3f2a1c9`, so the run keeps naming
+exactly those weights. The repo is created if needed, private unless you pass `private=False`.
+
+It also writes the repo's README from the run: the dataset and commit, epochs reported, headline results,
+per-condition test scores and speed, with the Hub's `model-index` as front matter, so the scores show on the
+model page. A README is added only when the repo has none, so one you wrote is never replaced; pass
+`card=False` to skip it. No config values go in it. It is written from what Visin has when you call, so log
+the epoch and test results first.
+
+`safetensors=True` also uploads a PyTorch checkpoint that is a plain state dict as `model.safetensors`, beside the
+original (it needs `torch` installed). The format holds tensors only, so anything saved next to the weights, like
+a pipeline's `model_info`, stays in the original file, which is why neither replaces the other.
+
+Needs `pip install 'visin[hf]'` and your own Hub token (`HF_TOKEN` or `huggingface-cli login`). Visin never
+sees it. The project must keep its storage on Hugging Face (project settings, **Storage**): a project set to
+Visin refuses the link, and the checkpoint is then on the Hub but not shown on the run. A failure is logged,
+never raised into training; the call returns the commit hash, or `None` when nothing was uploaded.
+
 ## Config
 
 ```python
@@ -173,7 +198,7 @@ visin.log_epoch(epoch, train={"loss": loss})
 ```
 
 `visin.get_run()` returns that run, for anything the shortcuts do not cover.
-`log_epoch`, `log_test_results`, `log_benchmark`, `log_config`, `upload_visualization`, `update` and
+`log_epoch`, `log_test_results`, `log_benchmark`, `log_config`, `log_model`, `upload_visualization`, `update` and
 `finish` all take what the `Run` methods take. With no run started they do nothing, like a disabled
 run. A run made with `Run.create` directly is yours to hold and is not made current. With two runs in
 one process, call the methods on the one you mean.

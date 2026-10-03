@@ -6,6 +6,8 @@ the same for the signed-URL uploads that go straight to file-service.
 """
 
 import json
+import types
+from pathlib import Path
 
 BASE = "https://visin.example.test"
 
@@ -151,3 +153,62 @@ class FakeAtexit:
 
     def unregister(self, callback):
         self.callbacks = [known for known in self.callbacks if known != callback]
+
+
+class FakeHubApi:
+    def __init__(self, hub):
+        self.hub = hub
+
+    def create_repo(self, **kwargs):
+        self.hub.created.append(kwargs)
+
+    def upload_file(self, **kwargs):
+        if self.hub.failure_on == kwargs["path_in_repo"]:
+            raise RuntimeError("refused")
+        return self.hub.commit("file", kwargs)
+
+    def file_exists(self, **kwargs):
+        return kwargs["filename"] in self.hub.existing
+
+    def upload_folder(self, **kwargs):
+        kwargs["files"] = sorted(
+            str(path.relative_to(kwargs["folder_path"]))
+            for path in Path(kwargs["folder_path"]).rglob("*")
+            if path.is_file()
+        )
+        return self.hub.commit("folder", kwargs)
+
+
+class FakeHub(types.ModuleType):
+    """Stands in for ``huggingface_hub``: records what was asked and writes a small repo."""
+
+    COMMIT = "3f2a1c9d8e7b6a5f4e3d2c1b0a99887766554433"
+
+    def __init__(self):
+        super().__init__("huggingface_hub")
+        self.downloads = []
+        self.uploads = []
+        self.created = []
+        self.existing = set()
+        self.failure = None
+        self.failure_on = None
+
+    def snapshot_download(self, **kwargs):
+        self.downloads.append(kwargs)
+        if self.failure:
+            raise self.failure
+        root = Path(kwargs["local_dir"])
+        (root / ".cache" / "huggingface").mkdir(parents=True, exist_ok=True)
+        (root / "images").mkdir(exist_ok=True)
+        (root / "images" / "1.png").write_bytes(b"png")
+        (root / "README.md").write_text(kwargs["revision"])
+        return str(root)
+
+    def HfApi(self):
+        return FakeHubApi(self)
+
+    def commit(self, kind, kwargs):
+        if self.failure:
+            raise self.failure
+        self.uploads.append({"kind": kind, **kwargs})
+        return types.SimpleNamespace(oid=self.COMMIT)

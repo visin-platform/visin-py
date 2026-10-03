@@ -225,6 +225,7 @@ def test_config_is_stored_and_linked_to_the_run(client, session):
     run.log_config({"lr": 1e-4, "batch": 8}, name="window16")
     run.flush()
     config = sent(session, "/configs/upload")[0]
+    assert config.pop("config_uuid")
     assert config == {
         "config_data": {"lr": 1e-4, "batch": 8},
         "summary": "window16",
@@ -267,6 +268,7 @@ def test_visualization_reserves_uploads_and_records(client, session, uploads, tm
     run.upload_visualization(3, frame, "overlay", metadata={"sample": 7})
     run.flush()
     reserve = sent(session, "/visualizations/upload-url")[0]
+    assert reserve.pop("visualization_uuid")
     assert reserve == {
         "epoch_uuid": epoch_uuid_for("run-1", 3),
         "filename": "overlay_0007.png",
@@ -412,6 +414,18 @@ def test_update_changes_the_run(client, session):
     assert sent(session, "/trainings/t1", "PUT") == [
         {"name": "renamed", "tags": ["best"], "metadata": {"best_epoch": 12}}
     ]
+
+
+def test_notes_are_the_researchers_own_text_and_an_empty_string_removes_them(client, session, caplog):
+    session.route("GET", "/trainings/uuid/", ok({"_id": "t1"}))
+    run = make_run(client)
+    run.update(notes="used the relabelled night set")
+    run.update(notes="")
+    run.update(notes="x" * 6000)
+    run.flush()
+    first, second, third = sent(session, "/trainings/t1", "PUT")
+    assert first == {"notes": "used the relabelled night set"} and second == {"notes": ""}
+    assert len(third["notes"]) == 5000 and "notes truncated to 5000" in caplog.text
 
 
 def test_finish_sets_the_terminal_status(client, session):
@@ -622,7 +636,9 @@ def test_pydantic_style_configs_are_read(client, session):
     run = make_run(client)
     run.log_config(Model(), summary="from pydantic")
     run.flush()
-    assert sent(session, "/configs/upload")[0] == {"config_data": {"lr": 3}, "summary": "from pydantic"}
+    body = sent(session, "/configs/upload")[0]
+    assert body.pop("config_uuid")
+    assert body == {"config_data": {"lr": 3}, "summary": "from pydantic"}
 
 
 def test_hydra_configs_are_resolved(client, session, monkeypatch):

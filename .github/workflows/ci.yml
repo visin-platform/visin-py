@@ -97,9 +97,14 @@ jobs:
         run: >
           curl -fsSL -o "$RUNNER_TEMP/vision.json"
           https://raw.githubusercontent.com/visin-platform/visin/main/apps/frontend/landing-front/public/openapi/vision.json
+      - name: Fetch the dataset API spec Visin publishes
+        run: >
+          curl -fsSL -o "$RUNNER_TEMP/dataset.json"
+          https://raw.githubusercontent.com/visin-platform/visin/main/apps/frontend/landing-front/public/openapi/dataset.json
       - run: make contract
         env:
           VISIN_OPENAPI: ${{ runner.temp }}/vision.json
+          VISIN_DATASET_OPENAPI: ${{ runner.temp }}/dataset.json
 
   build:
     name: Package

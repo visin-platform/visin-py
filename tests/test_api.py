@@ -246,3 +246,169 @@ def test_compare_frame_puts_runs_side_by_side(api, session):
     assert list(frame.columns) == ["one", "two"]
     assert frame.loc[2, "two"] == 0.4
     assert frame["one"].isna().loc[2]
+
+
+SUMMARY = {
+    "training": {"_id": "t1", "uuid": "u1", "name": "n", "status": "completed", "datasetId": "zod"},
+    "epochCount": 3,
+    "lastEpoch": 3,
+    "metrics": [
+        {
+            "path": "val.loss",
+            "direction": "lower",
+            "directionFrom": "default",
+            "best": {"value": 0.2, "epoch": 3},
+            "last": {"value": 0.2, "epoch": 3},
+        },
+        {
+            "path": "val.mean_iou",
+            "direction": "higher",
+            "directionFrom": "taxonomy",
+            "best": {"value": 0.7, "epoch": 2},
+            "last": {"value": 0.6, "epoch": 3},
+        },
+    ],
+    "models": [{"_id": "m1", "repo": "acme/m", "revision": "a" * 40}],
+    "provenance": {"git": {"commit": "b" * 40, "dirty": False}},
+}
+
+
+def test_a_summary_gives_the_best_epoch_of_each_result_beside_the_last(api, session):
+    session.route("GET", "/trainings/t1/summary", ok(SUMMARY))
+    summary = api.summary(RUN)
+    assert (summary.epoch_count, summary.last_epoch, summary.training.status) == (3, 3, "completed")
+    iou = summary.metric("val.mean_iou")
+    assert (iou.best_value, iou.best_epoch, iou.last_value, iou.last_epoch) == (0.7, 2, 0.6, 3)
+    assert (iou.direction, iou.direction_from) == ("higher", "taxonomy")
+    assert summary.metric("val.loss").direction == "lower"
+    assert summary.metric("val.nothing") is None
+    assert summary.models[0]["repo"] == "acme/m" and summary.provenance["git"]["commit"] == "b" * 40
+
+
+def test_a_summary_is_found_by_uuid_and_of_a_run_that_reported_nothing(api, session):
+    session.route("GET", "/trainings/uuid/u1", ok({"_id": "t1", "uuid": "u1", "name": "n"}))
+    session.route(
+        "GET", "/trainings/t1/summary", ok({"training": {"_id": "t1"}, "epochCount": 0, "lastEpoch": None})
+    )
+    summary = api.summary("u1")
+    assert summary.last_epoch is None and summary.metrics == () and summary.provenance == {}
+
+
+def test_a_run_carries_its_models_and_provenance(api, session):
+    session.route(
+        "GET",
+        "/trainings/uuid/u1",
+        ok(
+            {
+                "_id": "t1",
+                "uuid": "u1",
+                "name": "n",
+                "models": [{"repo": "acme/m"}],
+                "provenance": {"host": {}},
+            }
+        ),
+    )
+    run = api.training("u1")
+    assert run.models == ({"repo": "acme/m"},) and run.provenance == {"host": {}}
+
+
+def finding(number, created="2026-10-0%dT10:00:00.000Z"):
+    return {
+        "_id": f"{number:024x}",
+        "projectId": "p1",
+        "title": f"finding {number}",
+        "body": "b",
+        "createdAt": created % number,
+        "trainingId": "t1",
+        "trainingIds": ["t1", "t2"],
+        "authorKind": "assistant",
+        "authorLabel": "Claude",
+        "recommendations": "next",
+    }
+
+
+def test_findings_are_read_newest_first_a_page_at_a_time_by_cursor(api, session, monkeypatch):
+    monkeypatch.setattr("visin.api.FINDINGS_PAGE", 2)
+    session.route(
+        "GET", "/findings", ok([finding(5), finding(4)]), ok([finding(3), finding(2)]), ok([finding(1)])
+    )
+    found = list(api.findings(project="road-seg"))
+    assert [f.title for f in found] == [f"finding {n}" for n in (5, 4, 3, 2, 1)]
+    cursors = [call["params"].get("before") for call in session.calls]
+    assert cursors == [None, f"2026-10-04T10:00:00.000Z_{4:024x}", f"2026-10-02T10:00:00.000Z_{2:024x}"]
+    assert session.calls[0]["params"]["project"] == "road-seg"
+    first = found[0]
+    assert (first.author_kind, first.recommendations, first.training_ids) == (
+        "assistant",
+        "next",
+        ("t1", "t2"),
+    )
+
+
+def test_findings_stop_at_the_limit_and_can_be_about_one_run(api, session):
+    session.route("GET", "/trainings/uuid/u1", ok({"_id": "t1", "uuid": "u1", "name": "n"}))
+    session.route("GET", "/findings", ok([finding(3), finding(2)]))
+    assert [f.title for f in api.findings(run="u1", limit=1)] == ["finding 3"]
+    assert session.calls[-1]["params"]["training"] == "t1" and session.calls[-1]["params"]["limit"] == 1
+
+
+def test_comparisons_are_listed_a_page_at_a_time(api, session):
+    item = {
+        "_id": "c1",
+        "uuid": "cu",
+        "name": "A vs B",
+        "type": "trainings",
+        "itemIds": ["t1", "t2"],
+        "projectId": "p1",
+    }
+    session.route(
+        "GET",
+        "/comparisons",
+        page("comparisons", [item, {**item, "uuid": "cu2"}], 1, 2),
+        page("comparisons", [{**item, "uuid": "cu3"}], 2, 2),
+    )
+    found = list(api.comparisons(project="road-seg", type="trainings", page_size=2))
+    assert [c.uuid for c in found] == ["cu", "cu2", "cu3"]
+    assert found[0].item_ids == ("t1", "t2") and found[0].type == "trainings"
+    params = session.calls[0]["params"]
+    assert params["projectId"] == "road-seg" and params["type"] == "trainings" and "search" not in params
+
+
+def test_a_project_says_which_way_a_result_is_better_or_that_it_has_not():
+    from visin.models import Project
+
+    project = Project.from_json(
+        {
+            "_id": "p1",
+            "name": "Road",
+            "taxonomy": {
+                "metrics": [
+                    {"key": "mean_iou", "direction": "higher"},
+                    {"key": "val.latency", "direction": "lower"},
+                    {"key": "x"},
+                ]
+            },
+        }
+    )
+    assert project.direction("val.mean_iou") == "higher" and project.direction("mean_iou") == "higher"
+    assert project.direction("val.latency") == "lower" and project.direction("train.latency") is None
+    assert project.direction("val.x") is None
+    assert Project.from_json({"_id": "p2", "name": "Bare"}).direction("val.loss") is None
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_a_nonpositive_finding_limit_reads_nothing(api, session, limit):
+    assert list(api.findings(run="u1", limit=limit)) == []
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("full_first", [True, False])
+def test_metric_direction_matches_platform_full_path_precedence(full_first):
+    from visin.models import Project
+
+    metrics = [{"key": "score", "direction": "higher"}, {"key": "val.score", "direction": "lower"}]
+    project = Project.from_json(
+        {"name": "Road", "taxonomy": {"metrics": metrics[::-1] if full_first else metrics}}
+    )
+    assert project.direction("val.score") == "lower"
+    assert project.direction("train.score") == "higher"

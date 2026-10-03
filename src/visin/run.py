@@ -9,16 +9,19 @@ import os
 import uuid as uuidlib
 from collections.abc import Iterable, Mapping
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from . import system as _system
+from ._internal import hub
+from ._internal import provenance as provenance_info
 from ._internal.config import HOSTED_URL, Settings, read_settings
 from ._internal.delivery import Delivery
 from ._internal.images import encode_png, is_image
 from ._internal.inputs import as_mapping, default_name, epoch_number, merge_results, now
-from ._internal.payloads import benchmark_payload, run_payload, update_body
+from ._internal.payloads import benchmark_payload, model_payload, run_payload, update_body
 from ._internal.process import ProcessHooks, rank
-from ._internal.reports import discard_staged
+from ._internal.reports import discard_staged, fetch_model_card
 from ._internal.serialize import to_jsonable
 from ._internal.spool import Spool
 from ._internal.transport import HttpClient, worth_retrying_later
@@ -100,6 +103,8 @@ class Run:
         self._mark_status = mark_status
         if training_id and training_uuid:
             self._delivery.context.training_ids[training_uuid] = training_id
+        if mark_status and self._delivery.sender is not None:
+            self._delivery.sender.start_heartbeat(self._delivery.heartbeat)
         self._finished = False
         self._warned_nonfinite = False
         self._resumed: bool | None = None
@@ -118,7 +123,7 @@ class Run:
         name: str,
         *,
         project: str | None = None,
-        dataset: str | None = None,
+        dataset: str | Mapping[str, Any] | None = None,
         model: str | None = None,
         config: Any = None,
         config_id: str | None = None,
@@ -132,18 +137,24 @@ class Run:
         directory: str | os.PathLike[str] | None = None,
         strict: bool = False,
         system_metrics: bool = False,
+        provenance: bool | None = None,
     ) -> Run:
         """Register a new run and return it.
 
         ``project`` is the project's id or slug. With a pipeline key (an API key
         limited to a project) it can be left out: the server puts the run in the
         key's project, whatever ``project`` says. ``model`` travels
-        under ``metadata``, and ``dataset`` fills ``datasetId`` as well.
+        under ``metadata``. A dataset string fills ``datasetId``; a mapping fills
+        the structured ``dataset`` reference, including its pinned revision.
 
         With ``training_uuid`` (or ``VISIN_TRAINING_UUID``) naming a run that
         already exists, that run is resumed rather than duplicated, so a
         restarted job carries on where it was; :attr:`resumed` says which
         happened.
+
+        The run records what it was started from, so it can be reproduced: the git commit,
+        branch and whether the tree was dirty, the command line (credentials redacted), the
+        installed packages and the machine. ``provenance=False`` or ``VISIN_PROVENANCE=0`` sends none of it.
 
         Raises :class:`~visin.errors.ApiError` when Visin refuses the run.
         """
@@ -162,6 +173,7 @@ class Run:
             dataset=dataset,
             model=model,
             config_id=config_id,
+            provenance=provenance_info.collect() if provenance_info.enabled(provenance) else None,
             description=description,
             tags=tags,
             metadata=metadata,
@@ -508,6 +520,7 @@ class Run:
                 name_epoch=epoch_uuid_for,
                 timestamp=timestamp,
             )
+            payload["benchmark_uuid"] = str(uuidlib.uuid4())
             body = self._jsonable(payload, "benchmark")
         except (TypeError, ValueError) as exc:
             self._handle(exc, "log benchmark")
@@ -531,6 +544,7 @@ class Run:
         try:
             data = as_mapping(config)
             body: dict[str, Any] = {
+                "config_uuid": str(uuidlib.uuid4()),
                 "config_data": data,
                 "summary": str(summary or data.get("Summary") or name or self.name or "Config"),
             }
@@ -580,6 +594,9 @@ class Run:
             }
             if metadata:
                 body["metadata"] = dict(metadata)
+            body["visualization_uuid"] = str(
+                uuidlib.uuid5(uuidlib.NAMESPACE_URL, f"visin:{body['epoch_uuid']}:{kind}:{filename}")
+            )
             op["body"] = self._jsonable(body, "visualization")
         except (ConfigurationError, OSError, TypeError, ValueError, ImportError) as exc:
             if op is not None:
@@ -623,6 +640,85 @@ class Run:
             op["path"] = os.path.abspath(source)
         return name or os.path.basename(source), content_type, op
 
+    def log_model(
+        self,
+        path: str | os.PathLike[str],
+        repo: str,
+        *,
+        epoch: int | None = None,
+        path_in_repo: str | None = None,
+        private: bool = True,
+        card: bool = True,
+        safetensors: bool = False,
+    ) -> str | None:
+        """Upload a checkpoint to the Hugging Face Hub and link it to this run.
+
+        ``path`` is a file or a folder; ``repo`` is the model repo, ``org/name``,
+        created when it does not exist (private, unless ``private=False``).
+        Visin stores only a pointer to the commit this upload made, so the run
+        keeps naming exactly these bytes. ``epoch`` says which epoch the
+        checkpoint came from, and ``path_in_repo`` where in the repo it goes.
+
+        With ``card=True`` (the default) Visin also writes the repo's README from this
+        run: dataset, epochs, results, test scores and speed, as the Hub's
+        ``model-index`` so the scores show on the model page. It is added only when
+        the repo has no README yet, so one you wrote is never replaced.
+
+        With ``safetensors=True`` a PyTorch checkpoint file that is a plain state dict is also uploaded as
+        ``model.safetensors`` beside the original, for tools that prefer the format. It needs ``torch``
+        and ``safetensors`` installed, and holds the tensors only: metadata saved beside them stays in
+        the original.
+
+        The upload uses your own Hugging Face token (``HF_TOKEN`` or ``huggingface-cli
+        login``) and needs ``pip install 'visin[hf]'``. The project must keep its
+        storage on Hugging Face (project settings), or Visin refuses the link and
+        the checkpoint is on the Hub but not shown on the run. Returns the commit
+        hash, or ``None`` when nothing was uploaded; a failure is logged, never
+        raised into training.
+        """
+        if not self._accepting():
+            return None
+        try:
+            source = Path(path).expanduser()
+            if not source.exists():
+                raise FileNotFoundError(f"no such checkpoint: {source}")
+            number = None if epoch is None else epoch_number(epoch)
+            if isinstance(number, float):
+                raise ValueError("a checkpoint's epoch must be a whole number")
+            stored = path_in_repo or (None if source.is_dir() else source.name)
+            readme = self._model_card(repo, number) if card else None
+            revision = hub.upload_model(
+                source,
+                repo,
+                path_in_repo=path_in_repo,
+                private=private,
+                card=readme,
+                safetensors=safetensors,
+            )
+        except (VisinError, OSError, TypeError, ValueError) as exc:
+            self._handle(exc, "upload model")
+            return None
+        body = model_payload(repo, revision, path=stored, epoch=number)
+        self._emit({"op": "model", "training_uuid": self.training_uuid, "body": body})
+        return revision
+
+    def _model_card(self, repo: str, epoch: int | float | None) -> str | None:
+        client = self._delivery.client
+        if client is None or not self.training_uuid:
+            return None
+        try:
+            self.flush()
+            return fetch_model_card(
+                client,
+                self._delivery.context,
+                self.training_uuid,
+                repo,
+                None if epoch is None else int(epoch),
+            )
+        except VisinError as exc:
+            logger.info("visin: no model card for %s: %s", repo, exc)
+            return None
+
     def update(
         self,
         *,
@@ -630,14 +726,17 @@ class Run:
         description: str | None = None,
         tags: Iterable[str] | str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        notes: str | None = None,
     ) -> None:
-        """Change the run's name, description, tags or metadata.
+        """Change the run's name, description, tags, metadata or notes.
 
-        ``metadata`` replaces what the run has; it is not merged.
+        ``metadata`` replaces what the run has; it is not merged. ``notes`` is your own commentary on the
+        run (up to 5,000 characters), apart from the description, which says what the run is; an empty
+        string removes it.
         """
         if not self._accepting() or not self.training_uuid:
             return
-        body = update_body(name=name, description=description, tags=tags, metadata=metadata)
+        body = update_body(name=name, description=description, tags=tags, metadata=metadata, notes=notes)
         if name is not None and name.strip():
             self.name = name.strip()
         if not body:
@@ -778,7 +877,7 @@ def init(
     name: str | None = None,
     *,
     project: str | None = None,
-    dataset: str | None = None,
+    dataset: str | Mapping[str, Any] | None = None,
     model: str | None = None,
     config: Any = None,
     description: str | None = None,
@@ -791,6 +890,7 @@ def init(
     directory: str | os.PathLike[str] | None = None,
     strict: bool = False,
     system_metrics: bool = False,
+    provenance: bool | None = None,
 ) -> Run:
     """Start reporting this script as a Visin run: the one call most scripts need.
 
@@ -818,5 +918,6 @@ def init(
             directory=directory,
             strict=strict,
             system_metrics=system_metrics,
+            provenance=provenance,
         )
     )

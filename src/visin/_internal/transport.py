@@ -167,6 +167,7 @@ class HttpClient:
         timeout: Timeout | None = None,
         idempotent: bool | None = None,
         retries: int | None = None,
+        anonymous: bool = False,
     ) -> Any:
         """Send one request and return the unwrapped ``data`` field.
 
@@ -186,7 +187,9 @@ class HttpClient:
             idempotent = method != "POST"
         url = f"{self.base_url}/{path.lstrip('/')}"
         body = None if json is None else jsonlib.dumps(to_jsonable(json), allow_nan=False)
-        headers = {"Content-Type": "application/json"} if body is not None else None
+        headers: dict[str, str | None] = {"Content-Type": "application/json"} if body is not None else {}
+        if anonymous:
+            headers["Authorization"] = None
 
         attempt = 0
         while True:

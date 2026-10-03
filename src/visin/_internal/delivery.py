@@ -27,7 +27,7 @@ from typing import Any
 
 from ..errors import VisinError
 from .lock import SYNC_LOCK, exclusive
-from .reports import DeliveryContext, deliver, discard_staged
+from .reports import DeliveryContext, deliver, discard_staged, training_id
 from .sender import Sender
 from .spool import Spool, sync_spool
 from .transport import HttpClient, worth_retrying_later
@@ -53,6 +53,22 @@ class Delivery:
         self._next_catch_up = 0.0
         self._warned_repeat = False
         self._delivered_epochs: set[str] = set()
+
+    def heartbeat(self) -> None:
+        """Send current liveness without replaying it later or delaying the training loop."""
+        if self.client is None or not self.training_uuid:
+            return
+        if (
+            self.spooling
+            and self.spool is not None
+            and self.training_uuid not in self.context.training_ids
+            and not self.catch_up()
+        ):
+            return
+        ident = training_id(self.client, self.context, self.training_uuid)
+        self.client.request("POST", f"/trainings/{ident}/heartbeat", json={}, idempotent=True, retries=0)
+        if self.spooling and self.spool is not None:
+            self.catch_up()
 
     @property
     def mode(self) -> str:

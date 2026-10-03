@@ -17,7 +17,20 @@ from ._version import __version__
 from .api import Api, flatten
 from .datasets import CachedDataset, Datasets, cached_datasets, remove_cached
 from .errors import ApiError, ConfigurationError, SyncInProgressError, TransportError, VisinError
-from .models import Benchmark, Configuration, Dataset, Epoch, Project, TestResult, Training, Visualization
+from .models import (
+    Benchmark,
+    Comparison,
+    Configuration,
+    Dataset,
+    Epoch,
+    Finding,
+    MetricSummary,
+    Project,
+    Summary,
+    TestResult,
+    Training,
+    Visualization,
+)
 from .offline import SyncResult, pending, sync
 from .run import Run, epoch_uuid_for, get_run, init
 from .shortcuts import (
@@ -25,6 +38,7 @@ from .shortcuts import (
     log_benchmark,
     log_config,
     log_epoch,
+    log_model,
     log_test_results,
     update,
     upload_visualization,
@@ -36,14 +50,18 @@ __all__ = [
     "ApiError",
     "Benchmark",
     "CachedDataset",
+    "Comparison",
     "Configuration",
     "ConfigurationError",
     "Dataset",
     "Datasets",
     "Epoch",
+    "Finding",
+    "MetricSummary",
     "Project",
     "Run",
     "Settings",
+    "Summary",
     "SyncInProgressError",
     "SyncResult",
     "TestResult",
@@ -62,6 +80,7 @@ __all__ = [
     "log_benchmark",
     "log_config",
     "log_epoch",
+    "log_model",
     "log_test_results",
     "pending",
     "read_settings",

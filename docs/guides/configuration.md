@@ -10,6 +10,7 @@ Every setting can come from the environment, which keeps tokens out of code, or 
 | `VISIN_PROJECT` | `project=` | The project's id or slug. Needed with a key that is not limited to a project; a pipeline key's runs always go to its own project. |
 | `VISIN_TRAINING_UUID` | `training_uuid=` | Report into this run instead of creating one. |
 | `VISIN_MODE` | `mode=` | `online` (the default), `offline` or `disabled`. |
+| `VISIN_PROVENANCE` | `init(provenance=)` | `0` stops a run recording what it was started from: the git commit and branch (and whether the tree was dirty), the command line with credentials redacted, the installed packages and the machine. On by default. |
 | `VISIN_DIR` | `directory=` | Where reports wait when they cannot be sent. Default `~/.visin`. |
 | `VISIN_VERIFY_SSL` | | `0` turns off TLS verification, for a self-signed development server only. |
 | `VISIN_DATASET_URL` | `Datasets(url=)` | The dataset service's address, such as `https://dataset-api.visin.eu`. Datasets are served apart from runs, so downloading needs this as well as `VISIN_URL`. |
@@ -82,3 +83,12 @@ import logging
 
 logging.getLogger("visin").setLevel(logging.DEBUG)
 ```
+
+Active online runs send a heartbeat every 30 seconds. Projects mark silent jobs `stalled` after their
+configured timeout (30 minutes by default); a new heartbeat or epoch resumes them.
+Heartbeats keep checking the connection after an outage and retry queued reports even during a long epoch. Offline and
+post-training reporting (`mark_status=False`) send no heartbeat. Configs, benchmarks and
+visualizations carry client IDs so retries and spool replay keep one record.
+
+Dataset reads retry anonymously only when an older server specifically refuses a project-limited
+key. Current servers allow pipeline keys to read public datasets and their project's owner's datasets.

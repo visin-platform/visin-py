@@ -5,7 +5,7 @@ Everything a script needs is importable from `visin` itself:
 | Name | What it is |
 | --- | --- |
 | [`init`](run.md#visin.run.init) | Start reporting this script as a run. The one call most scripts need. |
-| [`Run`](run.md#visin.run.Run) | A run: `log_epoch`, `log_test_results`, `log_benchmark`, `log_config`, `upload_visualization`, `update`, `finish`. |
+| [`Run`](run.md#visin.run.Run) | A run: `log_epoch`, `log_test_results`, `log_benchmark`, `log_config`, `log_model`, `upload_visualization`, `update`, `finish`. |
 | [`get_run`](run.md#visin.run.get_run), [`log_epoch`](shortcuts.md), … | Log through the current run, from code that was not handed the `Run`. |
 | [`Api`](api.md#visin.api.Api) | Read projects, runs, epochs, test results and benchmarks. |
 | [`Datasets`](datasets.md#visin.datasets.Datasets) | List and download the datasets Visin hosts. |

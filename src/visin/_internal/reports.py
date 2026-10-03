@@ -8,8 +8,8 @@ means an op replayed a week later lands exactly as it would have at the time.
 
 Delivery is made safe to repeat wherever the API allows it. A run, an epoch and
 a test result carry a caller-generated UUID, so a repeat is answered 409 and
-counted as delivered. Benchmarks and configs carry none, so those are the only
-ops a lost answer can duplicate.
+counted as delivered. Configs, benchmarks and visualizations also carry client
+identifiers, so a lost answer can be replayed safely.
 """
 
 from __future__ import annotations
@@ -26,7 +26,9 @@ from .transport import HttpClient
 
 logger = logging.getLogger("visin")
 
-KINDS = frozenset({"create_run", "epoch", "test_result", "benchmark", "config", "visualization", "update"})
+KINDS = frozenset(
+    {"create_run", "epoch", "test_result", "benchmark", "config", "visualization", "update", "model"}
+)
 
 
 @dataclass
@@ -61,6 +63,23 @@ def training_id(client: HttpClient, context: DeliveryContext, training_uuid: str
     return str(ident)
 
 
+def fetch_model_card(
+    client: HttpClient, context: DeliveryContext, training_uuid: str, repo: str, epoch: int | None
+) -> str | None:
+    """The README Visin writes for a run's model, or ``None`` when it cannot be had.
+
+    A card is a courtesy: an older server without the endpoint, a refusal or a
+    dropped connection means the checkpoint is uploaded without one.
+    """
+    ident = training_id(client, context, training_uuid)
+    params: dict[str, Any] = {"repo": repo}
+    if epoch is not None:
+        params["epoch"] = epoch
+    card = client.request("GET", f"/trainings/{ident}/model-card", params=params, retries=context.retries)
+    readme = (card or {}).get("readme")
+    return readme if isinstance(readme, str) and readme else None
+
+
 def _already_there(exc: ApiError) -> bool:
     return exc.status == 409
 
@@ -75,11 +94,16 @@ def deliver(client: HttpClient, op: dict[str, Any], context: DeliveryContext) ->
     if kind == "test_result":
         return _post_once(client, "/test-results/upload", body, context)
     if kind == "benchmark":
-        return client.request("POST", "/benchmarks/upload", json=body, retries=context.retries)
+        return _post_once(client, "/benchmarks/upload", body, context)
     if kind == "config":
         return _config(client, op, body, context)
     if kind == "visualization":
         return _visualization(client, op, body, context)
+    if kind == "model":
+        ident = training_id(client, context, op["training_uuid"])
+        return client.request(
+            "POST", f"/trainings/{ident}/models", json=body, idempotent=True, retries=context.retries
+        )
     if kind == "update":
         ident = training_id(client, context, op["training_uuid"])
         return client.request("PUT", f"/trainings/{ident}", json=body, retries=context.retries)
@@ -88,7 +112,13 @@ def deliver(client: HttpClient, op: dict[str, Any], context: DeliveryContext) ->
 
 def _post_once(client: HttpClient, path: str, body: dict[str, Any], context: DeliveryContext) -> Any:
     try:
-        return client.request("POST", path, json=body, idempotent=True, retries=context.retries)
+        return client.request(
+            "POST",
+            path,
+            json=body,
+            idempotent=path != "/benchmarks/upload" or bool(body.get("benchmark_uuid")),
+            retries=context.retries,
+        )
     except ApiError as exc:
         # The server refuses a repeat of a UUID it already has. That is exactly
         # the outcome a retry should produce, so it counts as delivered.
@@ -135,7 +165,20 @@ def _config(client: HttpClient, op: dict[str, Any], body: dict[str, Any], contex
             context.training_ids[training_uuid] = str(training["_id"])
     if project:
         body = {**body, "projectId": project}
-    config = client.request("POST", "/configs/upload", json=body, retries=context.retries)
+    try:
+        config = client.request(
+            "POST",
+            "/configs/upload",
+            json=body,
+            idempotent=bool(body.get("config_uuid")),
+            retries=context.retries,
+        )
+    except ApiError as exc:
+        if not _already_there(exc) or not body.get("config_uuid"):
+            raise
+        config = client.request(
+            "GET", f"/configs/uuid/{quote(body['config_uuid'], safe='')}", retries=context.retries
+        )
     config_id = (config or {}).get("_id")
     training_uuid = op.get("training_uuid")
     if config_id and training_uuid:
@@ -151,17 +194,25 @@ def _visualization(
     path = staged_path(op, context)
     if not path.exists():
         raise ConfigurationError(f"the file for visualization {body.get('filename')!r} is gone: {path}")
-    grant = client.request(
-        "POST",
-        "/visualizations/upload-url",
-        json={
-            "epoch_uuid": body["epoch_uuid"],
-            "filename": body["filename"],
-            "type": body["type"],
-            "mimetype": body["mimetype"],
-        },
-        retries=context.retries,
-    )
+    try:
+        grant = client.request(
+            "POST",
+            "/visualizations/upload-url",
+            json={
+                **{key: body[key] for key in ("epoch_uuid", "filename", "type", "mimetype")},
+                **(
+                    {"visualization_uuid": body["visualization_uuid"]}
+                    if body.get("visualization_uuid")
+                    else {}
+                ),
+            },
+            idempotent=bool(body.get("visualization_uuid")),
+            retries=context.retries,
+        )
+    except ApiError as exc:
+        if _already_there(exc) and body.get("visualization_uuid"):
+            return None
+        raise
     try:
         upload_url, visualization_uuid, file_id = (
             grant["uploadUrl"],

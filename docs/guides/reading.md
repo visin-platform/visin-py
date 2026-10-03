@@ -37,6 +37,35 @@ api.tags()  # every tag in use
 
 A later script can pick up an earlier run by name, without having kept its UUID.
 
+## How a run did, in one call
+
+```python
+summary = api.summary(run)
+iou = summary.metric("val.mean_iou")
+iou.best_value, iou.best_epoch, iou.last_value  # the best epoch beside the last
+summary.models, summary.provenance  # linked Hub models; the code, command and machine
+```
+
+A run's last epoch is not its result, so every result comes with its best epoch and its last. "Best" follows
+the project's metric directions; read `iou.direction_from`: `taxonomy` means the project said which way is
+better, `default` means Visin guessed from the name (a loss or a latency is lower-is-better, the rest higher).
+
+## Findings, comparisons and which way a metric is better
+
+```python
+for finding in api.findings(project="road-seg", limit=10):  # newest first; run="<uuid>" for one run's
+    print(finding.title, finding.author_kind)
+
+for comparison in api.comparisons(project="road-seg", type="trainings"):
+    print(comparison.name, comparison.item_ids)
+
+project = api.project("road-seg")
+project.direction("val.mean_iou")  # "higher", "lower", or None when the project has not said
+```
+
+Visin does not know whether a result is better high or low unless the project says so in its taxonomy. Ask
+`project.direction(...)` before ranking runs, and treat `None` as "you are guessing".
+
 ## What a run was launched with, and its frames
 
 ```python

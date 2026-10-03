@@ -264,3 +264,80 @@ def test_login_with_a_broken_env_file_says_so(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("VISIN_ENV_FILE", str(tmp_path / "missing.env"))
     assert main(["login", "--token", "t", "--no-check"]) == 1
     assert "VISIN_ENV_FILE" in capsys.readouterr().err
+
+
+PIPELINE = {
+    "kind": "pipeline-key",
+    "scopes": ["vision:read", "vision:write"],
+    "label": "nightly",
+    "project": {"id": "p1", "name": "Road"},
+}
+
+
+def discovery(credential=None, **addresses):
+    return ok({**addresses, "credential": credential or {"kind": "anonymous"}})
+
+
+def test_check_says_what_the_server_says_the_key_is_and_what_it_can_do(server, session, capsys, monkeypatch):
+    monkeypatch.setenv("VISIN_TOKEN", "vsn_live_abcdefghijklmnop")
+    session.route("GET", "/.well-known/visin", discovery(PIPELINE))
+    code, out = run_cli(capsys, "check")
+    assert code == 0, out
+    assert "the pipeline key for project 'Road' (vision:read, vision:write) is accepted" in out
+    assert "if it is a pipeline key" not in out
+
+
+def test_check_warns_that_a_read_only_key_cannot_report(server, session, capsys, monkeypatch):
+    monkeypatch.setenv("VISIN_TOKEN", "vsn_live_abcdefghijklmnop")
+    session.route("GET", "/.well-known/visin", discovery({"kind": "api-key", "scopes": ["vision:read"]}))
+    code, out = run_cli(capsys, "check")
+    assert code == 0 and "the API key (vision:read) is accepted" in out
+    assert "this key can only read: it cannot report runs" in out
+    assert "otherwise set VISIN_PROJECT" in out
+
+
+def test_check_falls_back_to_the_look_of_the_token_when_the_server_cannot_say(
+    server, session, capsys, monkeypatch
+):
+    monkeypatch.setenv("VISIN_TOKEN", "vsn_live_abcdefghijklmnop")
+    session.route("GET", "/.well-known/visin", refused(404, "Not found"))
+    code, out = run_cli(capsys, "check")
+    assert code == 0 and "the API key is accepted" in out
+
+
+def test_login_takes_the_dataset_and_app_addresses_from_the_server(server, session, capsys, monkeypatch):
+    monkeypatch.delenv("VISIN_URL")
+    monkeypatch.delenv("VISIN_TOKEN")
+    session.route(
+        "GET",
+        "/.well-known/visin",
+        discovery(PIPELINE, datasetApiUrl="https://datasets.lab.test", appUrl="https://app.lab.test"),
+        discovery(PIPELINE, datasetApiUrl="https://datasets.lab.test", appUrl="https://app.lab.test"),
+    )
+    code, out = run_cli(capsys, "login", "--url", "https://v.test", "--token", "vsn_live_abcdefghijklmnop")
+    assert code == 0, out
+    settings = read_settings()
+    assert (settings.dataset_url, settings.app_url) == ("https://datasets.lab.test", "https://app.lab.test")
+
+
+def test_login_keeps_addresses_the_user_already_chose(server, session, capsys, monkeypatch):
+    monkeypatch.delenv("VISIN_URL")
+    monkeypatch.delenv("VISIN_TOKEN")
+    config_path().parent.mkdir(parents=True, exist_ok=True)
+    config_path().write_text("VISIN_DATASET_URL=https://mine.test\nVISIN_APP_URL=https://mine-app.test\n")
+    session.route(
+        "GET",
+        "/.well-known/visin",
+        *[discovery(PIPELINE, datasetApiUrl="https://datasets.lab.test", appUrl="https://app.lab.test")] * 2,
+    )
+    run_cli(capsys, "login", "--url", "https://v.test", "--token", "vsn_live_abcdefghijklmnop")
+    settings = read_settings()
+    assert (settings.dataset_url, settings.app_url) == ("https://mine.test", "https://mine-app.test")
+
+
+def test_login_with_no_check_asks_the_server_nothing(server, session, capsys, monkeypatch):
+    monkeypatch.delenv("VISIN_URL")
+    monkeypatch.delenv("VISIN_TOKEN")
+    run_cli(capsys, "login", "--url", "https://v.test", "--token", "x", "--no-check")
+    assert not [call for call in session.calls if "well-known" in call["url"]]
+    assert read_settings().dataset_url is None

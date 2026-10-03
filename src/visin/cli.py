@@ -9,6 +9,7 @@ visin sync --list      show what is waiting, send nothing
 visin runs             list recent runs
 visin datasets         list the datasets on Visin
 visin download zod     download a dataset (once) and print its folder
+visin push zod --repo org/name   publish a dataset to Hugging Face, and point Visin at it
 visin cache            show what downloads left on disk; `visin cache rm zod` deletes one
 visin version
 """
@@ -23,7 +24,7 @@ import logging
 import os
 import sys
 import uuid as uuidlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import quote
 
@@ -50,6 +51,25 @@ def _credential_kind(token: str | None) -> str:
     if token.count(".") == 2:
         return "JWT"
     return "unrecognised token"
+
+
+def _discover(client: HttpClient) -> dict[str, Any]:
+    """What the server says about itself and the credential it was sent: ``{}`` when it cannot say."""
+    try:
+        return dict(client.request("GET", "/.well-known/visin") or {})
+    except VisinError:
+        return {}
+
+
+def _describe_credential(credential: Mapping[str, Any]) -> str:
+    """``pipeline key for project 'Road' (vision:read, vision:write)``, as the server described it."""
+    kind = {"pipeline-key": "pipeline key", "api-key": "API key", "session": "browser session"}.get(
+        str(credential.get("kind")), "credential"
+    )
+    project = credential.get("project") or {}
+    scoped = f" for project {project['name']!r}" if project.get("name") else ""
+    scopes = credential.get("scopes")
+    return f"{kind}{scoped}" + (f" ({', '.join(scopes)})" if scopes else "")
 
 
 def _print_json(data: Any) -> None:
@@ -119,13 +139,17 @@ def _check(client: HttpClient, token: str | None, project: str | None, write: bo
         # Answers only a credential it accepts; the public reads above would
         # let a wrong token through as anonymous.
         client.request("GET", "/trainings/deleted", params={"limit": 1})
-        out.ok(f"the {_credential_kind(token)} is accepted")
     except ApiError as exc:
         out.fail(f"the token was refused: {exc}")
         return 1
     except VisinError as exc:
         out.fail(str(exc))
         return 1
+    credential = _discover(client).get("credential") or {}
+    described = _describe_credential(credential) if credential else _credential_kind(token)
+    out.ok(f"the {described} is accepted")
+    if credential and "vision:write" not in (credential.get("scopes") or ["vision:write"]):
+        out.info("this key can only read: it cannot report runs")
 
     project_id = None
     if project:
@@ -138,9 +162,9 @@ def _check(client: HttpClient, token: str | None, project: str | None, write: bo
             out.fail(f"project {project!r}: {exc}{hint}")
         except VisinError as exc:
             out.fail(f"project {project!r}: {exc}")
-    elif _credential_kind(token) == "API key":
+    elif (credential.get("kind") == "api-key") if credential else _credential_kind(token) == "API key":
         out.info("runs go to the key's project if it is a pipeline key; otherwise set VISIN_PROJECT")
-    if _credential_kind(token) == "unrecognised token":
+    if not credential and _credential_kind(token) == "unrecognised token":
         out.info("this is not an API key: create a pipeline key in the project's Settings")
 
     if not write:
@@ -221,6 +245,7 @@ def cmd_login(args: argparse.Namespace) -> int:
     if not token:
         print("visin login: pass --token, or run it in a terminal to be asked", file=sys.stderr)
         return 1
+    found: dict[str, Any] = {}
     if not args.no_check:
         out = _Printer()
         client = HttpClient(url, token, verify=current.verify_ssl, retries=1)
@@ -228,13 +253,19 @@ def cmd_login(args: argparse.Namespace) -> int:
             if _check(client, token, args.project, False, out) != 0:
                 print("visin login: not saved, because the check failed (use --no-check to save anyway)")
                 return 1
+            found = _discover(client)
         finally:
             client.close()
     values = {"VISIN_URL": url, "VISIN_TOKEN": token}
     if args.project:
         values["VISIN_PROJECT"] = args.project
-    if url.removesuffix("/api") == HOSTED_URL and not current.dataset_url:
-        values["VISIN_DATASET_URL"] = HOSTED_DATASET_URL
+    if not current.dataset_url:
+        if found.get("datasetApiUrl"):
+            values["VISIN_DATASET_URL"] = str(found["datasetApiUrl"])
+        elif url.removesuffix("/api") == HOSTED_URL:
+            values["VISIN_DATASET_URL"] = HOSTED_DATASET_URL
+    if found.get("appUrl") and not current.app_url:
+        values["VISIN_APP_URL"] = str(found["appUrl"])
     path = write_config(values)
     print(f"saved to {path}")
     shadowing = [name for name in values if (os.environ.get(name) or "").strip()]
@@ -378,6 +409,20 @@ def cmd_download(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_push(args: argparse.Namespace) -> int:
+    from .datasets import Datasets
+
+    logging.getLogger("visin").setLevel(logging.INFO)
+    try:
+        with Datasets(args.url, args.token, directory=args.dir) as datasets:
+            revision = datasets.push(args.dataset, args.repo, private=not args.public)
+    except VisinError as exc:
+        print(f"visin push: {exc}", file=sys.stderr)
+        return 1
+    print(f"{args.repo}@{revision}")
+    return 0
+
+
 def _size(value: int) -> str:
     for unit, scale in (("GB", 2**30), ("MB", 2**20), ("KB", 2**10)):
         if value >= scale:
@@ -486,6 +531,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     download.add_argument("--keep-archive", action="store_true", help="retain the ZIP after extraction")
     download.set_defaults(handler=cmd_download)
+
+    push = commands.add_parser("push", help="publish a dataset to Hugging Face and point Visin at it")
+    dataset_server(push)
+    push.add_argument("dataset", help="its name (e.g. zod) or id")
+    push.add_argument("--repo", required=True, help="the Hub dataset repo, org/name (created if needed)")
+    push.add_argument("--public", action="store_true", help="make a new repo public (default: private)")
+    push.add_argument("--dir", help="where datasets go (default: VISIN_DATA_DIR)")
+    push.set_defaults(handler=cmd_push)
 
     cache = commands.add_parser("cache", help="show or delete downloaded datasets")
     cache.add_argument("--dir", help="the data directory (default: VISIN_DATA_DIR)")

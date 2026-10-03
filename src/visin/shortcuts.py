@@ -34,6 +34,11 @@ def log_config(*args: Any, **kwargs: Any) -> None:
     get_run().log_config(*args, **kwargs)
 
 
+def log_model(*args: Any, **kwargs: Any) -> str | None:
+    """:meth:`Run.log_model` on the current run."""
+    return get_run().log_model(*args, **kwargs)
+
+
 def upload_visualization(*args: Any, **kwargs: Any) -> None:
     """:meth:`Run.upload_visualization` on the current run."""
     get_run().upload_visualization(*args, **kwargs)

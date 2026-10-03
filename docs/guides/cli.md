@@ -18,7 +18,7 @@ saved to /home/me/.visin/config
 
 Saves the address and token so no `export` lines are needed. It checks them first and saves nothing
 if the check fails. The file is created readable only by you, and lines it does not set are kept.
-For the hosted Visin it also saves the dataset address, so `visin download` works at once.
+The server tells it where its dataset service and web app are (`GET /api/.well-known/visin`), so `visin download` and run links work at once with no further exports. An address you already set is kept. It also says which kind of key you gave it, such as `pipeline key for project 'Road' (vision:read, vision:write)`.
 
 | Option | |
 | --- | --- |
@@ -108,6 +108,24 @@ Downloads a dataset by name or id, unpacks it, and prints the folder, so a job s
 | `--keep-archive` | Keep the ZIP after unpacking it. |
 | `--no-unzip` | Download only, and print the ZIP's path. |
 | `--url`, `--token` | Override `VISIN_DATASET_URL` and `VISIN_TOKEN`. A token is only needed for private datasets. |
+
+## visin push
+
+```text
+$ visin push zod --repo acme/zod-png
+acme/zod-png@3f2a1c9d8e7b6a5f4e3d2c1b0a99887766554433
+```
+
+Publishes a dataset kept on Visin to the Hugging Face Hub with your own Hub token, then points Visin at
+the repo and the commit. See [Datasets](datasets.md#publishing-a-dataset-to-the-hub). Needs `visin[hf]`
+and the right to manage the dataset.
+
+| Option | |
+| --- | --- |
+| `--repo ORG/NAME` | The Hub dataset repo. Required. Created when it does not exist. |
+| `--public` | Make a newly created repo public. The default is private. |
+| `--dir DIR` | Where datasets go, as for `download`. |
+| `--url`, `--token` | Override `VISIN_DATASET_URL` and `VISIN_TOKEN`. |
 
 ## visin cache
 

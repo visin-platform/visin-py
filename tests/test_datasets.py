@@ -1,12 +1,15 @@
 import io
+import json
+import sys
 import zipfile
 
 import pytest
 import requests
-from fakes import BASE, FakeStream, ok
+from fakes import BASE, FakeStream, ok, refused
 
 from visin import Datasets
 from visin.cli import main
+from visin.datasets import MARKER
 from visin.errors import ConfigurationError, TransportError, VisinError
 
 ZOD_ID = "6aad9ac1f900dcbe46605ba9"
@@ -381,3 +384,278 @@ def test_remove_cached_matches_names_exactly_not_by_prefix(tmp_path):
     removed = remove_cached("zo", data)
     assert [item.path.name for item in removed] == ["zo-bbb2.unpacking"]
     assert (data / "zod-full-aaa1.unpacking").exists()
+
+
+def test_a_same_size_replacement_downloads_its_actual_revision(datasets, session, uploads):
+    first = zod()
+    first["archive"]["uploadedAt"] = "2026-01-01T00:00:00.000Z"
+    session.routes[("GET", "/datasets")] = [ok([first])]
+    root = datasets.download("zod", keep_archive=True)
+    replacement = zipped(
+        {"zod_dataset/train.txt": "camera/2.png\n", "zod_dataset/camera/1.png": "png" * 2000}
+    )
+    second = zod()
+    second["archive"]["uploadedAt"] = "2026-02-01T00:00:00.000Z"
+    session.routes[("GET", "/datasets")] = [ok([second])]
+    uploads.files[SIGNED] = replacement
+    assert datasets.download("zod", keep_archive=True) == root
+    assert len(uploads.gets) == 2
+    assert (root / "train.txt").read_text() == "camera/2.png\n"
+
+
+@pytest.mark.parametrize("already_extracted", [False, True])
+def test_download_pins_the_archive_signed_after_metadata_was_read(
+    datasets, session, uploads, already_extracted
+):
+    import json
+
+    first = zod()
+    first["archive"]["uploadedAt"] = "2026-01-01T00:00:00.000Z"
+    session.routes[("GET", "/datasets")] = [ok([first])]
+    if already_extracted:
+        datasets.download("zod", keep_archive=True)
+        session.routes[("GET", "/datasets")] = [ok([first])]
+    replacement = zipped({"zod_dataset/train.txt": "replacement content of another size"})
+    session.routes[("GET", f"/datasets/{ZOD_ID}/download")] = [
+        ok(
+            {
+                "downloadUrl": SIGNED,
+                "filename": "zod_dataset.zip",
+                "size": len(replacement),
+                "revision": "2026-02-01T00:00:00.000Z",
+            }
+        )
+    ]
+    uploads.files[SIGNED] = replacement
+    root = datasets.download("zod", quiet=True, keep_archive=True)
+    assert (root / "train.txt").read_text() == "replacement content of another size"
+    marker = json.loads((root.parent / ".visin-dataset.json").read_text())
+    assert marker["revision"] == "2026-02-01T00:00:00.000Z"
+    assert marker["size"] == len(replacement)
+
+
+@pytest.mark.parametrize("contents", ["[]", "null", "{", "{}"])
+@pytest.mark.parametrize("known_size", [False, True])
+def test_a_damaged_cache_marker_is_rebuilt(datasets, session, uploads, contents, known_size):
+    item = zod()
+    if not known_size:
+        item["archive"].pop("size")
+    session.routes[("GET", "/datasets")] = [ok([item])]
+    root = datasets.download("zod", quiet=True)
+    (root.parent / ".visin-dataset.json").write_text(contents)
+    session.route("GET", "/datasets", ok([item]))
+    assert datasets.download("zod", quiet=True) == root
+    assert len(uploads.gets) == 2
+
+
+@pytest.mark.parametrize("filename", ["inner/../../escaped.zip", "inner\\..\\..\\escaped.zip"])
+def test_the_download_filename_cannot_write_outside_the_cache(datasets, session, tmp_path, filename):
+    session.routes[("GET", f"/datasets/{ZOD_ID}/download")] = [
+        ok({"downloadUrl": SIGNED, "filename": filename})
+    ]
+    archive = datasets.download("zod", quiet=True, unzip=False)
+    assert archive.parent == tmp_path / "data"
+    assert archive.name == f"{ZOD_ID}-escaped.zip"
+    assert not (tmp_path / "escaped.zip").exists()
+
+
+HUB_COMMIT = "3f2a1c9d8e7b6a5f4e3d2c1b0a99887766554433"
+NEXT_COMMIT = "b" * 40
+SOURCE = {"provider": "hf", "repo": "acme/zod-png", "revision": HUB_COMMIT}
+
+
+def on_hub(session, *, zip_too=False, source=SOURCE):
+    """ZOD kept on the Hub, with the zip as a fallback when ``zip_too``."""
+    item = {"_id": ZOD_ID, "name": "ZOD", "source": source}
+    answer = {"source": source, "revision": source["revision"]}
+    if zip_too:
+        item["archive"] = {"size": len(ARCHIVE), "filename": "zod_dataset.zip"}
+        answer |= {
+            "downloadUrl": SIGNED,
+            "filename": "zod_dataset.zip",
+            "size": len(ARCHIVE),
+            "archiveRevision": "2026-10-02T10:00:00.000Z",
+        }
+    session.routes[("GET", "/datasets")] = [ok([item]), ok([item]), ok([item])]
+    session.routes[("GET", f"/datasets/{ZOD_ID}/download")] = [ok(answer), ok(answer), ok(answer)]
+
+
+def test_a_hub_dataset_is_downloaded_at_its_commit_into_the_same_layout(datasets, session, hf, tmp_path):
+    on_hub(session)
+    root = datasets.download("zod")
+    assert hf.downloads == [
+        {
+            "repo_id": "acme/zod-png",
+            "repo_type": "dataset",
+            "revision": HUB_COMMIT,
+            "local_dir": str(tmp_path / "data" / f"zod-{ZOD_ID}.unpacking"),
+        }
+    ]
+    assert (root / "images" / "1.png").read_bytes() == b"png"
+    assert not (root / ".cache").exists()
+    marker = json.loads((root / MARKER).read_text())
+    assert marker["revision"] == HUB_COMMIT and marker["source"] == SOURCE and marker["size"] is None
+
+
+def test_a_hub_dataset_is_not_downloaded_again_until_its_commit_changes(datasets, session, hf):
+    on_hub(session)
+    first = datasets.download("zod")
+    datasets.download("zod")
+    assert len(hf.downloads) == 1
+    on_hub(session, source={**SOURCE, "revision": NEXT_COMMIT})
+    assert (datasets.download("zod") / "README.md").read_text() == NEXT_COMMIT
+    assert len(hf.downloads) == 2 and first.exists()
+
+
+def test_a_cached_hub_dataset_needs_no_hub_and_no_extra(datasets, session, hf, monkeypatch):
+    on_hub(session)
+    datasets.download("zod")
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+    session.calls.clear()
+    assert datasets.download("zod").exists()
+    assert not [call for call in session.calls if call["url"].endswith("/download")]
+
+
+def test_the_hub_is_preferred_over_the_zip_kept_on_visin(datasets, session, uploads, hf):
+    on_hub(session, zip_too=True)
+    datasets.download("zod")
+    assert len(hf.downloads) == 1
+    assert not uploads.gets
+
+
+def test_a_hub_failure_falls_back_to_the_zip_and_records_its_version(datasets, session, hf, caplog):
+    on_hub(session, zip_too=True)
+    hf.failure = RuntimeError("401 gated")
+    root = datasets.download("zod")
+    assert (root / "camera" / "1.png").exists()
+    assert "using the zip kept on Visin instead" in caplog.text
+    assert json.loads((root.parent / MARKER).read_text())["revision"] == "2026-10-02T10:00:00.000Z"
+
+
+def test_a_hub_failure_with_no_zip_says_what_went_wrong(datasets, session, hf):
+    on_hub(session)
+    hf.failure = RuntimeError("401 gated")
+    with pytest.raises(VisinError, match=r"could not download acme/zod-png@3f2a1c9.*HF_TOKEN"):
+        datasets.download("zod")
+
+
+def test_a_missing_hub_extra_is_named_and_the_zip_is_used_when_there_is_one(datasets, session, monkeypatch):
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+    on_hub(session)
+    with pytest.raises(ConfigurationError, match=r"visin\[hf\]"):
+        datasets.download("zod")
+    on_hub(session, zip_too=True)
+    assert datasets.download("zod").exists()
+
+
+def test_a_hub_only_dataset_has_no_zip_to_keep(datasets, session, hf):
+    on_hub(session)
+    with pytest.raises(VisinError, match="on Hugging Face only"):
+        datasets.download("zod", unzip=False)
+    with pytest.raises(VisinError, match="on Hugging Face only"):
+        datasets.download("zod", keep_archive=True)
+    assert not hf.downloads
+
+
+def test_a_dataset_with_a_hub_source_is_downloadable_without_a_zip():
+    from visin.models import Dataset
+
+    assert Dataset.from_json({"_id": ZOD_ID, "name": "ZOD", "source": SOURCE}).downloadable
+    assert Dataset.from_json({"_id": ZOD_ID, "name": "ZOD", "source": SOURCE}).source == SOURCE
+    assert not Dataset.from_json({"_id": ZOD_ID, "name": "ZOD", "source": {"repo": "x"}}).downloadable
+
+
+def test_a_visin_dataset_is_published_to_the_hub_and_visin_is_pointed_at_it(datasets, session, hf, uploads):
+    session.route("PATCH", f"/datasets/{ZOD_ID}", ok({}))
+    assert datasets.push("zod", "acme/zod-png") == HUB_COMMIT
+    assert hf.created == [
+        {"repo_id": "acme/zod-png", "repo_type": "dataset", "private": True, "exist_ok": True}
+    ]
+    (upload,) = hf.uploads
+    assert upload["kind"] == "folder" and upload["repo_type"] == "dataset"
+    assert upload["ignore_patterns"] == [MARKER]
+    assert "camera/1.png" in upload["files"]
+    (patch,) = [call for call in session.calls if call["method"] == "PATCH"]
+    assert patch["json"] == {"source": {"repo": "acme/zod-png", "revision": HUB_COMMIT}}
+
+
+def test_a_public_repo_must_be_asked_for(datasets, session, hf):
+    session.route("PATCH", f"/datasets/{ZOD_ID}", ok({}))
+    datasets.push("zod", "acme/zod-png", private=False)
+    assert hf.created[0]["private"] is False
+
+
+def test_a_dataset_already_on_the_hub_or_without_a_zip_is_not_published(datasets, session, hf):
+    on_hub(session)
+    with pytest.raises(VisinError, match=r"already on Hugging Face \(acme/zod-png@3f2a1c9\)"):
+        datasets.push("zod", "acme/other")
+    session.routes[("GET", "/datasets")] = [ok([{"_id": ZOD_ID, "name": "ZOD"}])]
+    with pytest.raises(VisinError, match="no zip on Visin to publish"):
+        datasets.push("zod", "acme/other")
+    assert not hf.uploads
+
+
+def test_a_failed_upload_changes_nothing_on_visin(datasets, session, hf):
+    hf.failure = RuntimeError("403")
+    with pytest.raises(VisinError, match="could not upload"):
+        datasets.push("zod", "acme/zod-png")
+    assert not [call for call in session.calls if call["method"] == "PATCH"]
+
+
+def test_a_refused_link_says_where_the_data_went_and_how_to_finish(datasets, session, hf):
+    session.route("PATCH", f"/datasets/{ZOD_ID}", refused(403, "Forbidden"))
+    with pytest.raises(
+        VisinError, match=rf"uploaded to acme/zod-png@3f2a1c9, but Visin did not accept.*{HUB_COMMIT}"
+    ):
+        datasets.push("zod", "acme/zod-png")
+
+
+def test_cli_push_prints_the_repo_and_commit_or_the_reason(datasets, session, hf, capsys):
+    session.route("PATCH", f"/datasets/{ZOD_ID}", ok({}))
+    assert main(["push", "zod", "--repo", "acme/zod-png", "--public"]) == 0
+    assert capsys.readouterr().out.strip() == f"acme/zod-png@{HUB_COMMIT}"
+    assert hf.created[0]["private"] is False
+    hf.failure = RuntimeError("401")
+    session.route("GET", "/datasets", ok([zod()]))
+    assert main(["push", "zod", "--repo", "acme/zod-png"]) == 1
+    assert "visin push: could not upload" in capsys.readouterr().err
+
+
+def test_a_cached_zip_does_not_hide_a_new_hub_source(datasets, session, hf):
+    datasets.download("zod", quiet=True)
+    on_hub(session, zip_too=True)
+    root = datasets.download("zod", quiet=True)
+    assert (root / "README.md").read_text() == HUB_COMMIT
+    assert len(hf.downloads) == 1
+
+
+def test_a_hub_cache_is_bound_to_the_repo_as_well_as_the_commit(datasets, session, hf):
+    on_hub(session)
+    datasets.download("zod", quiet=True)
+    on_hub(session, source={**SOURCE, "repo": "other/zod-png"})
+    datasets.download("zod", quiet=True)
+    assert [call["repo_id"] for call in hf.downloads] == ["acme/zod-png", "other/zod-png"]
+
+
+@pytest.mark.parametrize("same_revision", [True, False])
+def test_an_interrupted_hub_download_resumes_only_the_same_source(
+    datasets, session, hf, monkeypatch, same_revision
+):
+    from pathlib import Path
+
+    on_hub(session)
+    download = hf.snapshot_download
+
+    def interrupted(**kwargs):
+        root = Path(kwargs["local_dir"])
+        (root / "old-only.png").write_bytes(b"partial")
+        raise RuntimeError("connection lost")
+
+    monkeypatch.setattr(hf, "snapshot_download", interrupted)
+    with pytest.raises(VisinError, match="connection lost"):
+        datasets.download("zod", quiet=True)
+    monkeypatch.setattr(hf, "snapshot_download", download)
+    on_hub(session, source={**SOURCE, "revision": HUB_COMMIT if same_revision else NEXT_COMMIT})
+    root = datasets.download("zod", quiet=True)
+    assert (root / "old-only.png").exists() is same_revision
+    assert not (root / ".cache").exists()

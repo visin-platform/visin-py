@@ -17,6 +17,7 @@ import contextlib
 import logging
 import queue
 import threading
+import time
 from typing import Callable
 
 logger = logging.getLogger("visin")
@@ -46,6 +47,9 @@ class Sender:
         self._abandoned = threading.Event()
         self._started = False
         self._lock = threading.Lock()
+        self._heartbeat: Callable[[], None] | None = None
+        self._heartbeat_interval = 30.0
+        self._next_heartbeat = 0.0
         self.dropped = 0
         self.failed = 0
         # Work handed back by a stop that could not wait for it: never attempted.
@@ -76,9 +80,25 @@ class Sender:
             return False
         return True
 
+    def start_heartbeat(self, work: Callable[[], None], interval: float = 30.0) -> None:
+        """Keep an active training visible during long epochs, on the existing sender thread."""
+        self._heartbeat = work
+        self._heartbeat_interval = interval
+        self._next_heartbeat = time.monotonic() + interval
+        self.submit(lambda: None)
+
     def _drain(self) -> None:
         while True:
-            item = self._queue.get()
+            if self._heartbeat and not self._stopping.is_set() and time.monotonic() >= self._next_heartbeat:
+                self._next_heartbeat = time.monotonic() + self._heartbeat_interval
+                try:
+                    self._heartbeat()
+                except Exception as exc:
+                    logger.debug("visin: heartbeat failed: %s", exc)
+            try:
+                item = self._queue.get(timeout=self._heartbeat_interval if self._heartbeat else None)
+            except queue.Empty:
+                continue
             try:
                 if item is None:
                     return

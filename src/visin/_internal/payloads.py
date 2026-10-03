@@ -25,6 +25,7 @@ from .inputs import epoch_number, now
 
 logger = logging.getLogger("visin")
 
+MAX_NOTES = 5000
 MAX_NAME = 200
 MAX_DESCRIPTION = 1000
 
@@ -48,15 +49,16 @@ def run_payload(
     name: str,
     *,
     project: str | None = None,
-    dataset: str | None = None,
+    dataset: str | Mapping[str, Any] | None = None,
     model: str | None = None,
     config_id: str | None = None,
+    provenance: Mapping[str, Any] | None = None,
     description: str | None = None,
     tags: Iterable[str] | str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The body that registers a run. ``model`` travels under ``metadata``, and
-    ``dataset`` fills ``datasetId`` as well."""
+    dataset strings fill ``datasetId`` and structured references fill ``dataset``."""
     combined: dict[str, Any] = dict(metadata or {})
     if model:
         combined["model"] = model
@@ -71,11 +73,16 @@ def run_payload(
     if combined:
         payload["metadata"] = combined
     if dataset:
-        payload["datasetId"] = dataset
+        if isinstance(dataset, Mapping):
+            payload["dataset"] = dict(dataset)
+        else:
+            payload["datasetId"] = dataset
     if project:
         payload["projectId"] = project
     if config_id:
         payload["configId"] = config_id
+    if provenance:
+        payload["provenance"] = dict(provenance)
     if tags:
         payload["tags"] = tag_list(tags)
     if len(name) > MAX_NAME:
@@ -92,8 +99,9 @@ def update_body(
     description: str | None = None,
     tags: Iterable[str] | str | None = None,
     metadata: Mapping[str, Any] | None = None,
+    notes: str | None = None,
 ) -> dict[str, Any]:
-    """The body that changes a run: only what was given. A blank name is ignored."""
+    """The body that changes a run: only what was given. A blank name is ignored; blank notes remove them."""
     body: dict[str, Any] = {}
     if name is not None and name.strip():
         body["name"] = name.strip()[:MAX_NAME]
@@ -103,6 +111,10 @@ def update_body(
         body["tags"] = tag_list(tags)
     if metadata is not None:
         body["metadata"] = dict(metadata)
+    if notes is not None:
+        if len(notes) > MAX_NOTES:
+            logger.warning("visin: notes truncated to %d characters", MAX_NOTES)
+        body["notes"] = notes[:MAX_NOTES]
     return body
 
 
@@ -137,3 +149,13 @@ def benchmark_payload(
     elif epoch_uuid:
         payload["epoch_uuid"] = epoch_uuid
     return payload
+
+
+def model_payload(repo: str, revision: str, *, path: str | None, epoch: int | float | None) -> dict[str, Any]:
+    """The body that links a Hub model to a run: a pointer pinned to one commit."""
+    body: dict[str, Any] = {"provider": "hf", "kind": "model", "repo": repo, "revision": revision}
+    if path:
+        body["path"] = path
+    if epoch is not None:
+        body["epoch"] = int(epoch)
+    return body

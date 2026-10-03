@@ -23,10 +23,23 @@ from urllib.parse import quote
 from ._internal.config import HOSTED_URL, read_settings
 from ._internal.transport import HttpClient
 from .errors import ConfigurationError
-from .models import Benchmark, Configuration, Epoch, Project, TestResult, Training, Visualization
+from .models import (
+    Benchmark,
+    Comparison,
+    Configuration,
+    Epoch,
+    Finding,
+    Project,
+    Summary,
+    TestResult,
+    Training,
+    Visualization,
+)
 
 # The server's cap on one page.
 MAX_PAGE_SIZE = 1000
+# The server's cap on one page of findings.
+FINDINGS_PAGE = 200
 
 # Sort keys are Python names here; the server spells them its own way.
 _SORT_KEYS = {
@@ -181,6 +194,57 @@ class Api:
             if name is None or training.name == name:
                 return training
         return None
+
+    def comparisons(
+        self,
+        *,
+        project: str | None = None,
+        type: str | None = None,  # noqa: A002 - the server's own word for what a comparison compares
+        search: str | None = None,
+        limit: int | None = None,
+        page_size: int = MAX_PAGE_SIZE,
+    ) -> Iterator[Comparison]:
+        """Saved comparisons, a page at a time, optionally of one ``type`` (trainings, tests, ...)."""
+        params = {"projectId": project, "type": type, "search": search}
+        params = {key: value for key, value in params.items() if value is not None}
+        for count, item in enumerate(self._pages("/comparisons", "comparisons", params, page_size)):
+            if limit is not None and count >= limit:
+                return
+            yield Comparison.from_json(item)
+
+    def findings(
+        self, *, project: str | None = None, run: str | Training | None = None, limit: int | None = None
+    ) -> Iterator[Finding]:
+        """Recorded findings, newest first: a project's, or those about one run (as its subject or cited)."""
+        if limit is not None and limit <= 0:
+            return
+        training = self.training(run).id if run is not None else None
+        before: str | None = None
+        yielded = 0
+        while True:
+            size = FINDINGS_PAGE if limit is None else max(1, min(FINDINGS_PAGE, limit - yielded))
+            items = (
+                self._get("/findings", project=project, training=training, limit=size, before=before) or []
+            )
+            for item in items:
+                yield Finding.from_json(item)
+                yielded += 1
+                if limit is not None and yielded >= limit:
+                    return
+            if len(items) < size:
+                return
+            last = items[-1]
+            before = f"{last['createdAt']}_{last['_id']}"
+
+    def summary(self, ref: str | Training) -> Summary:
+        """How a run did, in one call: its state, models and provenance, and per result the best epoch.
+
+        ``summary.metric("val.mean_iou")`` gives the best value, the epoch it was reached at and the last
+        value, for the direction the project says is better. A run's last epoch is not its result, so both
+        are there. Read ``direction_from`` on a metric: ``default`` means Visin guessed the direction.
+        """
+        training = self.training(ref)
+        return Summary.from_json(self._get(f"/trainings/{quote(training.id, safe='')}/summary") or {})
 
     def tags(self) -> list[str]:
         """Every tag on a run this credential can see."""
