@@ -1,5 +1,6 @@
 """What a run records about where it came from, and what it must never record."""
 
+import shlex
 import shutil
 import subprocess
 import sys
@@ -104,9 +105,13 @@ class TestEnvironment:
         monkeypatch.setattr(sys, "argv", [str(git_repo / "train.py"), "--token", "s3cret"])
         collected = provenance.collect()
         assert collected["git"]["branch"] == "main"
-        assert (
-            collected["command"].endswith("train.py --token '***'") and "s3cret" not in collected["command"]
-        )
+        assert shlex.split(collected["command"]) == [
+            sys.executable,
+            str(git_repo / "train.py"),
+            "--token",
+            "***",
+        ]
+        assert "s3cret" not in collected["command"]
         assert collected["packages"] and collected["host"]["python"]
 
     def test_a_script_outside_any_repo_falls_back_to_the_working_directory(

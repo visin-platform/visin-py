@@ -172,7 +172,7 @@ class FakeHubApi:
 
     def upload_folder(self, **kwargs):
         kwargs["files"] = sorted(
-            str(path.relative_to(kwargs["folder_path"]))
+            path.relative_to(kwargs["folder_path"]).as_posix()
             for path in Path(kwargs["folder_path"]).rglob("*")
             if path.is_file()
         )
