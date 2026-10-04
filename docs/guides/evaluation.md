@@ -265,9 +265,7 @@ A result recorded without a suite (with `run.log_test_results`, which Visin keep
 ranked without running anything again. **Promote** one onto a suite:
 
 ```python
-visin.promote(
-    result, suite="road-test@1", checkpoint=checkpoint, sample_counts={"day": 1200, "night": 800}
-)
+visin.promote(result, suite="road-test@1", checkpoint=checkpoint, sample_counts={"day": 1200, "night": 800})
 ```
 
 ```text

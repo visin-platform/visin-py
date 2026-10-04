@@ -80,7 +80,7 @@ def test_a_ranking_reads_as_the_contract_says(name):
     assert [(e.evaluation_id, e.rank, e.attempts) for e in board.entries] == [
         (row["id"], row["rank"], row["attempts"]) for row in want["entries"]
     ]
-    for entry, row in zip(board.entries, want["entries"], strict=True):
+    for entry, row in zip(board.entries, want["entries"]):
         assert entry.headline == pytest.approx(row["headline"], abs=1e-9)
         assert (entry.worst_condition, entry.worst_value) == (
             row["worst"]["condition"],
