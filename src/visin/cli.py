@@ -11,6 +11,15 @@ visin datasets         list the datasets on Visin
 visin download zod     download a dataset (once) and print its folder
 visin push zod --repo org/name   publish a dataset to Hugging Face, and point Visin at it
 visin cache            show what downloads left on disk; `visin cache rm zod` deletes one
+visin suites push FILE publish a scoring protocol (JSON, or YAML with visin[yaml]); list, show
+visin suites digest FILE   the digest Visin gives a protocol file, to send as what an evaluator ran
+visin evaluate RESULTS.json --suite road-test@1 --checkpoint best.pth --sample-count day=1200
+                       record a checkpoint's results on a suite (--dry-run to only check them)
+visin leaderboard road-test@1   the ranking of a suite version (--public for the anonymous one)
+visin evaluations      list recorded evaluations, with their verdicts
+visin diff A B         fail when evaluation B scores worse than A (--max-drop N), for CI
+visin publish ID       put a ranked evaluation on the public leaderboard; `visin withdraw ID` takes it off
+visin promote ID       rank an older test result on a suite without running anything again
 visin version
 """
 
@@ -24,7 +33,8 @@ import logging
 import os
 import sys
 import uuid as uuidlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -35,12 +45,17 @@ from ._internal.config import (
     read_settings,
     write_config,
 )
+from ._internal.providers import HUB
 from ._internal.spool import Spool, pending_runs
 from ._internal.transport import HttpClient
 from ._version import __version__
-from .errors import ApiError, VisinError
+from .compare import Diff, diff_evaluations
+from .errors import ApiError, ConfigurationError, VisinError
+from .evaluation import evaluate, hub_checkpoint, local_checkpoint, promote, publish, withdraw
+from .models import Evaluation, Leaderboard, Pagination
 from .offline import sync
 from .run import epoch_uuid_for
+from .suites import check_protocol, load_suite, manifest_digest, push_suite, read_split
 
 
 def _credential_kind(token: str | None) -> str:
@@ -461,6 +476,440 @@ def cmd_version(_args: argparse.Namespace) -> int:
     return 0
 
 
+EXIT_NOT_RANKED = 3
+EXIT_REGRESSION = 4
+EXIT_NOT_COMPARABLE = 5
+
+
+def _fail(command: str, exc: BaseException) -> int:
+    print(f"visin {command}: {exc}", file=sys.stderr)
+    return 1
+
+
+def _checkpoint(args: argparse.Namespace) -> dict[str, Any] | None:
+    """The checkpoint the flags describe, or ``None`` when none was given."""
+    if args.checkpoint and args.hub_repo:
+        raise ConfigurationError("give either --checkpoint (a file on this machine) or --hub-repo, not both")
+    if args.checkpoint:
+        return local_checkpoint(args.checkpoint, args.label)
+    if args.hub_repo:
+        if not args.hub_commit:
+            raise ConfigurationError(
+                "--hub-repo needs --hub-commit: the full 40-character commit, never a branch"
+            )
+        return hub_checkpoint(args.hub_repo, args.hub_commit, args.hub_path)
+    return None
+
+
+def _sample_counts(args: argparse.Namespace) -> dict[str, int]:
+    """Samples per condition, from ``--sample-counts FILE`` and each ``--sample-count NAME=N``."""
+    counts: dict[str, int] = {}
+    if args.sample_counts:
+        try:
+            loaded = json.loads(Path(args.sample_counts).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ConfigurationError(f"cannot read --sample-counts {args.sample_counts}: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise ConfigurationError('--sample-counts should hold an object like {"day": 1200}')
+        counts.update({str(name): int(value) for name, value in loaded.items()})
+    for item in args.sample_count or ():
+        name, separator, value = item.rpartition("=")
+        if not (separator and name and value.isdigit()):
+            raise ConfigurationError(f"--sample-count {item!r}: expected NAME=NUMBER, such as day=1200")
+        counts[name] = int(value)
+    return counts
+
+
+def _hub_data(value: str) -> dict[str, Any] | None:
+    repo, at, commit = value.partition("@")
+    return {"kind": HUB, "repo": repo, "commit": commit} if at and repo and commit else None
+
+
+_DATA_KINDS: dict[str, Callable[[str], dict[str, Any] | None]] = {
+    "external": lambda value: {"kind": "external", "manifestSha256": value},
+    "visin": lambda value: {"kind": "visin", "archiveSha256": value},
+    HUB: _hub_data,
+}
+
+
+def _data_evidence(text: str | None) -> dict[str, Any] | None:
+    """The data identity ``--data KIND=VALUE`` names.
+
+    A digest for ``external`` or ``visin``, and ``repo@commit`` for ``hf``. Each kind parses its own value
+    in ``_DATA_KINDS``, so another kind of data is one entry there.
+    """
+    if not text:
+        return None
+    kind, separator, value = text.partition("=")
+    if not (separator and value):
+        raise ConfigurationError(
+            f"--data {text!r}: expected KIND=VALUE, such as external=<manifest sha256>, "
+            "visin=<archive sha256> or hf=org/name@<40-character commit>"
+        )
+    parse = _DATA_KINDS.get(kind)
+    if parse is None:
+        raise ConfigurationError(f"--data {text!r}: the kind is {', '.join(_DATA_KINDS)}")
+    parsed = parse(value)
+    if parsed is None:
+        raise ConfigurationError(f"--data {text!r}: a Hub dataset is hf=org/name@<commit>")
+    return parsed
+
+
+def _class_names(text: str | None) -> list[str]:
+    return [name.strip() for name in (text or "").split(",") if name.strip()]
+
+
+def _classes_evidence(args: argparse.Namespace) -> dict[str, list[str]] | None:
+    if args.classes_ignored is not None and args.classes_scored is None:
+        raise ConfigurationError(
+            "--classes-ignored needs --classes-scored: say which classes were scored too"
+        )
+    if args.classes_scored is None:
+        return None
+    return {"scored": _class_names(args.classes_scored), "ignored": _class_names(args.classes_ignored)}
+
+
+def _print_evaluation(evaluation: Evaluation) -> None:
+    if evaluation.queued:
+        print(f"kept on disk, to send with `visin sync` (uuid {evaluation.uuid})")
+        return
+    if not evaluation.stored and evaluation.verdict is None:
+        print("not recorded: nothing is configured to send to")
+        return
+    verdict = evaluation.verdict
+    where = f" on {evaluation.suite}" if evaluation.suite else ""
+    if evaluation.stored:
+        print(f"recorded evaluation {evaluation.id}{where}")
+    else:
+        print(f"checked{where}; nothing was stored")
+    if verdict is None:
+        return
+    print(f"  verdict   {verdict.state}")
+    if verdict.evidence:
+        print(f"  evidence  {verdict.evidence}")
+    for reason in verdict.reasons:
+        print(f"  - {reason}")
+    for warning in verdict.warnings:
+        print(f"  ! {warning}")
+    if not verdict.ranked and verdict.reasons:
+        print(
+            "  every reason is explained, with how to fix it, in the docs under 'Why is my result unranked?'"
+        )
+
+
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    try:
+        results = json.loads(Path(args.results).read_text(encoding="utf-8"))
+        if not isinstance(results, dict):
+            raise ConfigurationError(
+                f"{args.results} should hold the results object: conditions, then metrics"
+            )
+        evaluator = {
+            key: value
+            for key, value in (
+                ("package", args.evaluator_package),
+                ("version", args.evaluator_version),
+                ("commit", args.evaluator_commit),
+            )
+            if value
+        }
+        evaluation = evaluate(
+            results,
+            suite=args.suite,
+            checkpoint=_checkpoint(args),
+            project=args.project,
+            sample_counts=_sample_counts(args) or None,
+            run=args.run,
+            epoch=args.epoch,
+            evaluator=evaluator or None,
+            data=_data_evidence(args.data),
+            protocol=args.protocol,
+            protocol_digest=args.protocol_digest,
+            classes=_classes_evidence(args),
+            uuid=args.uuid,
+            supersedes=args.supersedes,
+            dry_run=args.dry_run,
+            url=args.url,
+            token=args.token,
+        )
+    except (OSError, ValueError, VisinError) as exc:
+        return _fail("evaluate", exc)
+    if args.json:
+        _print_json(_evaluation_json(evaluation))
+    else:
+        _print_evaluation(evaluation)
+    if args.require_ranked and not evaluation.ranked:
+        return EXIT_NOT_RANKED
+    return 0
+
+
+def _evaluation_json(evaluation: Evaluation) -> dict[str, Any]:
+    verdict = evaluation.verdict
+    return {
+        "id": evaluation.id,
+        "uuid": evaluation.uuid,
+        "suite": evaluation.suite,
+        "stored": evaluation.stored,
+        "queued": evaluation.queued,
+        "ranked": evaluation.ranked,
+        "verdict": None
+        if verdict is None
+        else {
+            "state": verdict.state,
+            "reasons": [{"code": r.code, "detail": r.detail} for r in verdict.reasons],
+            "warnings": [{"code": r.code, "detail": r.detail} for r in verdict.warnings],
+        },
+    }
+
+
+def cmd_suites(args: argparse.Namespace) -> int:
+    from .api import Api
+
+    try:
+        if args.action == "push":
+            suite = push_suite(
+                load_suite(args.file),
+                project=args.project,
+                visibility="public" if args.public else "private" if args.private else None,
+                url=args.url,
+                token=args.token,
+            )
+            print(f"{suite.ref}  {suite.visibility}  protocol {(suite.digest or '')[:12]}")
+            return 0
+        if args.action == "manifest":
+            return _print_manifest(args)
+        if args.action == "digest":
+            print(check_protocol(args.file, url=args.url, token=args.token))
+            return 0
+        with Api(args.url, args.token) as api:
+            if args.action == "list":
+                found = api.suites(project=args.project, include_archived=args.all)
+                if args.json:
+                    _print_json([dataclasses.asdict(item) | {"raw": None} for item in found])
+                    return 0
+                for item in found:
+                    archived = "  archived" if item.archived_at else ""
+                    print(f"{item.ref:30}  {item.visibility or '':8}  {item.name}{archived}")
+                return 0
+            suite = api.suite(args.suite)
+            if args.json:
+                _print_json(suite.raw)
+                return 0
+            headline = suite.headline
+            protocol = suite.protocol
+            print(f"{suite.ref}  {suite.name}  ({suite.visibility})")
+            print(f"  protocol    {suite.digest}")
+            print(f"  task        {protocol.get('task')}, split {protocol.get('split')}")
+            better = "higher" if headline.get("direction") == "max" else "lower"
+            print(f"  headline    {headline.get('key')}, {better} is better")
+            print(f"  overall     {protocol.get('aggregation')}")
+            for condition in protocol.get("conditions") or ():
+                print(f"  condition   {condition.get('name')}  {condition.get('sampleCount')} samples")
+            return 0
+    except (OSError, ValueError, VisinError) as exc:
+        return _fail("suites", exc)
+
+
+def _print_manifest(args: argparse.Namespace) -> int:
+    conditions: dict[str, list[str]] = {}
+    for item in args.splits:
+        name, separator, path = item.partition("=")
+        if not (separator and name and path):
+            raise ConfigurationError(f"{item!r}: expected NAME=FILE, such as day_fair=test_day_fair.txt")
+        if name in conditions:
+            raise ConfigurationError(f"condition {name!r} is given twice")
+        conditions[name] = read_split(path)
+    digest = manifest_digest(conditions)
+    counts = [{"name": name, "sampleCount": len(samples)} for name, samples in conditions.items()]
+    if args.json:
+        _print_json({"manifestSha256": digest, "conditions": counts})
+        return 0
+    print(f"manifestSha256  {digest}")
+    for item in counts:
+        print(f"  {item['name']:20}  {item['sampleCount']} samples")
+    return 0
+
+
+def _page_note(label: str, shown: int, pagination: Pagination | None, complete: bool) -> str | None:
+    if pagination is None or (pagination.pages <= 1 and not complete):
+        return None
+    if complete:
+        return f"all {pagination.total} {label}"
+    return f"{label}: page {pagination.page} of {pagination.pages} ({shown} of {pagination.total} shown)"
+
+
+def _print_leaderboard(board: Leaderboard) -> None:
+    where = "public" if board.public else "visible to you"
+    unit = "higher" if board.direction == "max" else "lower"
+    print(f"{board.suite}  {board.headline_key} ({unit} is better); ranked among {board.candidates} {where}")
+    for entry in board.entries:
+        print(
+            f"  {entry.rank:>3}  {entry.name:40}  {entry.headline:.4g}  "
+            f"weakest {entry.worst_condition} {entry.worst_value:.4g}  gap {entry.gap:.4g}  "
+            f"{entry.attempts} attempt{'s' if entry.attempts != 1 else ''}"
+        )
+    for row in board.unranked:
+        reasons = ", ".join(
+            f"{r.get('code')}" + (f"({r['detail']})" if r.get("detail") else "")
+            for r in row.get("reasons") or ()
+        )
+        print(f"  not ranked  {row.get('checkpointKey')}  {row.get('state')}: {reasons}")
+    notes = (
+        _page_note("checkpoints", len(board.entries), board.pagination, board.complete),
+        _page_note("unranked", len(board.unranked), board.unranked_pagination, board.complete),
+    )
+    for note in notes:
+        if note:
+            print(f"  ({note})")
+
+
+def cmd_leaderboard(args: argparse.Namespace) -> int:
+    from .api import Api
+
+    try:
+        with Api(args.url, args.token) as api:
+            if args.public:
+                if args.unranked_page is not None:
+                    raise ValueError("the public ranking has no unranked list")
+                board = api.public_leaderboard(
+                    args.suite, page=args.page, limit=args.limit, all_pages=args.all, observed=args.observed
+                )
+            else:
+                board = api.leaderboard(
+                    args.suite,
+                    page=args.page,
+                    limit=args.limit,
+                    unranked_page=args.unranked_page,
+                    all_pages=args.all,
+                    observed=args.observed,
+                )
+    except (ValueError, VisinError) as exc:
+        return _fail("leaderboard", exc)
+    if args.json:
+        _print_json(board.raw)
+    else:
+        _print_leaderboard(board)
+    return 0
+
+
+def _print_diff(result: Diff) -> None:
+    print(f"{result.suite}: {result.candidate} against {result.baseline} (allowed drop {result.max_drop:g})")
+    for change in result.changes:
+        if change.improvement is None:
+            before = "-" if change.baseline is None else f"{change.baseline:.4g}"
+            after = "-" if change.candidate is None else f"{change.candidate:.4g}"
+            detail = f"{before} -> {after}  not comparable"
+        else:
+            detail = f"{change.baseline:.4g} -> {change.candidate:.4g}  {change.improvement:+.4g}"
+        print(f"  {change.status:9}  {change.scope:20}  {change.metric}  {detail}")
+    for problem in result.problems:
+        print(f"  ! {problem}")
+    print("  ok" if result.passed else "  FAILED")
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    from .api import Api
+
+    try:
+        with Api(args.url, args.token) as api:
+            baseline = api.evaluation(args.baseline, project=args.project)
+            candidate = api.evaluation(args.candidate, project=args.project)
+            if not baseline.suite:
+                raise ValueError(
+                    "the baseline names no suite: only results on one suite version can be compared"
+                )
+            result = diff_evaluations(
+                baseline,
+                candidate,
+                api.suite(baseline.suite),
+                max_drop=args.max_drop,
+                all_metrics=args.all_metrics,
+            )
+    except (ValueError, VisinError) as exc:
+        return _fail("diff", exc)
+    if args.json:
+        _print_json(
+            {
+                "suite": result.suite,
+                "baseline": result.baseline,
+                "candidate": result.candidate,
+                "maxDrop": result.max_drop,
+                "passed": result.passed,
+                "problems": list(result.problems),
+                "changes": [dataclasses.asdict(change) for change in result.changes],
+            }
+        )
+    else:
+        _print_diff(result)
+    if result.missing or result.problems:
+        return EXIT_NOT_COMPARABLE
+    return EXIT_REGRESSION if result.regressions else 0
+
+
+def cmd_evaluations(args: argparse.Namespace) -> int:
+    from .api import Api
+
+    try:
+        with Api(args.url, args.token) as api:
+            found = api.evaluations(project=args.project, suite=args.suite, state=args.state)[: args.limit]
+    except VisinError as exc:
+        return _fail("evaluations", exc)
+    if args.json:
+        _print_json([_evaluation_json(item) | {"checkpoint": item.checkpoint} for item in found])
+        return 0
+    for item in found:
+        verdict = str(item.verdict) if item.verdict else "-"
+        name = item.checkpoint.get("label") or item.checkpoint.get("repo") or "-"
+        published = "  public" if item.published else ""
+        print(f"{item.id}  {item.suite or '-':24}  {name:28}  {verdict}{published}")
+    return 0
+
+
+def cmd_publication(args: argparse.Namespace) -> int:
+    action = publish if args.command == "publish" else withdraw
+    try:
+        evaluation = action(args.evaluation, url=args.url, token=args.token)
+    except VisinError as exc:
+        return _fail(args.command, exc)
+    state = (
+        "waiting for approval"
+        if evaluation.published and evaluation.pending_approval
+        else "public"
+        if evaluation.public
+        else "hidden by the suite's managers"
+        if evaluation.hidden
+        else "not public"
+    )
+    print(f"{evaluation.id}  {state}")
+    return 0
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    try:
+        checkpoint = _checkpoint(args)
+        if checkpoint is None:
+            raise ConfigurationError(
+                "say which checkpoint it was: --checkpoint FILE, or --hub-repo and --hub-commit"
+            )
+        counts = _sample_counts(args)
+        if not counts:
+            raise ConfigurationError(
+                "say how many samples each condition scored: --sample-count day=1200 ..."
+            )
+        evaluation = promote(
+            args.evaluation,
+            suite=args.suite,
+            checkpoint=checkpoint,
+            sample_counts=counts,
+            url=args.url,
+            token=args.token,
+        )
+    except (OSError, ValueError, VisinError) as exc:
+        return _fail("promote", exc)
+    _print_evaluation(evaluation)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="visin", description="Report training runs to Visin.")
     parser.add_argument("-v", "--verbose", action="store_true", help="log what the client does")
@@ -550,6 +999,153 @@ def build_parser() -> argparse.ArgumentParser:
         "--dir", default=argparse.SUPPRESS, help="the data directory (default: VISIN_DATA_DIR)"
     )
     cache.set_defaults(handler=cmd_cache, action=None)
+
+    def checkpoint_args(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--checkpoint", help="the weights file that was loaded; only its SHA-256 is sent")
+        sub.add_argument("--label", help="a name for a --checkpoint (default: the file name)")
+        sub.add_argument("--hub-repo", help="the checkpoint's Hugging Face repo, org/name")
+        sub.add_argument("--hub-commit", help="the full 40-character commit of --hub-repo")
+        sub.add_argument("--hub-path", help="a file or folder inside --hub-repo")
+        sub.add_argument(
+            "--sample-count",
+            action="append",
+            metavar="NAME=N",
+            help="samples scored in a condition; repeat for each condition",
+        )
+        sub.add_argument("--sample-counts", metavar="FILE", help='the counts as a JSON object, {"day": 1200}')
+
+    suites = commands.add_parser("suites", help="publish, list and show scoring protocols")
+    suite_actions = suites.add_subparsers(dest="action", metavar="action")
+    suite_actions.required = True
+    suite_push = suite_actions.add_parser("push", help="publish a suite version from a JSON or YAML file")
+    server(suite_push)
+    suite_push.add_argument("file", help="the suite file")
+    suite_push.add_argument(
+        "--project", help="the project it belongs to (default: the file's, VISIN_PROJECT)"
+    )
+    visible = suite_push.add_mutually_exclusive_group()
+    visible.add_argument("--public", action="store_true", help="let anyone read the protocol")
+    visible.add_argument("--private", action="store_true", help="only the project's readers (the default)")
+    suite_manifest = suite_actions.add_parser(
+        "manifest", help="the manifest digest and sample counts of split files, for a suite's data"
+    )
+    suite_manifest.add_argument(
+        "splits", nargs="+", metavar="NAME=FILE", help="a condition and the file listing its samples"
+    )
+    suite_manifest.add_argument("--json", action="store_true", help="print it as the JSON a suite file takes")
+    suite_digest = suite_actions.add_parser(
+        "digest", help="the digest Visin gives a suite or protocol file, without publishing it"
+    )
+    server(suite_digest)
+    suite_digest.add_argument("file", help="a suite file, or a file holding just the protocol")
+    suite_list = suite_actions.add_parser("list", help="list the suites you can read")
+    server(suite_list)
+    suite_list.add_argument("--project", help="only this project's suites")
+    suite_list.add_argument("--all", action="store_true", help="include archived suites")
+    suite_list.add_argument("--json", action="store_true", help="print the suites as JSON")
+    suite_show = suite_actions.add_parser(
+        "show", help="show one suite: slug@version, or a slug for the latest"
+    )
+    server(suite_show)
+    suite_show.add_argument("suite")
+    suite_show.add_argument("--json", action="store_true", help="print the suite as JSON")
+    suites.set_defaults(handler=cmd_suites)
+
+    evaluate_cmd = commands.add_parser("evaluate", help="record a checkpoint's results on a suite")
+    server(evaluate_cmd)
+    evaluate_cmd.add_argument("results", help="a JSON file of results: conditions, then metrics")
+    evaluate_cmd.add_argument("--suite", required=True, help="slug@version, such as road-test@1")
+    evaluate_cmd.add_argument("--project", help="the project (default: VISIN_PROJECT, or the key's project)")
+    checkpoint_args(evaluate_cmd)
+    evaluate_cmd.add_argument("--run", help="the training UUID the checkpoint came from")
+    evaluate_cmd.add_argument("--epoch", type=int, help="the epoch it was saved at")
+    evaluate_cmd.add_argument("--evaluator-package", help="what produced the numbers, e.g. visin-fusion")
+    evaluate_cmd.add_argument("--evaluator-version")
+    evaluate_cmd.add_argument("--evaluator-commit")
+    evaluate_cmd.add_argument(
+        "--data",
+        metavar="KIND=VALUE",
+        help="the data you read: external=<manifest sha256>, visin=<archive sha256> or hf=org/name@<commit>",
+    )
+    evaluate_cmd.add_argument(
+        "--protocol",
+        metavar="FILE",
+        help="the suite or protocol file you ran; its digest is asked of Visin (at `visin sync` if offline)",
+    )
+    evaluate_cmd.add_argument("--protocol-digest", help="the digest of the protocol you ran, if you have it")
+    evaluate_cmd.add_argument("--classes-scored", help="comma-separated class ids you scored")
+    evaluate_cmd.add_argument("--classes-ignored", help="comma-separated class ids you left out")
+    evaluate_cmd.add_argument("--uuid", help="your id for it: sending the same result again is harmless")
+    evaluate_cmd.add_argument("--supersedes", help="the id of the evaluation this one corrects")
+    evaluate_cmd.add_argument("--dry-run", action="store_true", help="judge it and store nothing")
+    evaluate_cmd.add_argument(
+        "--require-ranked",
+        action="store_true",
+        help=f"exit {EXIT_NOT_RANKED} when the result is not ranked, for CI",
+    )
+    evaluate_cmd.add_argument("--json", action="store_true", help="print the outcome as JSON")
+    evaluate_cmd.set_defaults(handler=cmd_evaluate)
+
+    board = commands.add_parser("leaderboard", help="show the ranking of a suite version")
+    server(board)
+    board.add_argument("suite", help="slug@version")
+    board.add_argument("--public", action="store_true", help="the anonymous ranking of published results")
+    board.add_argument(
+        "--page", type=int, help="the page of ranked checkpoints (default 1; ranks stay global)"
+    )
+    board.add_argument("--limit", type=int, help="checkpoints per page (default and maximum 100)")
+    board.add_argument("--unranked-page", type=int, help="the page of unranked checkpoints (default 1)")
+    board.add_argument("--all", action="store_true", help="read every page of both lists")
+    board.add_argument(
+        "--observed", action="store_true", help="rank only results whose evaluator sent complete evidence"
+    )
+    board.add_argument("--json", action="store_true", help="print it as JSON")
+    board.set_defaults(handler=cmd_leaderboard)
+
+    diff = commands.add_parser(
+        "diff", help="fail when one evaluation scores worse than another on the same suite version"
+    )
+    server(diff)
+    diff.add_argument(
+        "baseline", help="the evaluation to compare against: its id, or its uuid with --project"
+    )
+    diff.add_argument("candidate", help="the evaluation that must not be worse")
+    diff.add_argument("--project", help="the project, when the evaluations are named by uuid")
+    diff.add_argument(
+        "--max-drop", type=float, default=0.0, help="how far a score may fall, in its own units (default 0)"
+    )
+    diff.add_argument(
+        "--all-metrics", action="store_true", help="every metric the suite names, not only the headline"
+    )
+    diff.add_argument("--json", action="store_true", help="print the diff as JSON")
+    diff.set_defaults(handler=cmd_diff)
+
+    listing = commands.add_parser("evaluations", help="list recorded evaluations")
+    server(listing)
+    listing.add_argument("--project", help="only this project's evaluations")
+    listing.add_argument("--suite", help="only this suite version, slug@version")
+    listing.add_argument(
+        "--state", choices=["eligible", "incomplete", "incompatible", "exploratory", "legacy-unverified"]
+    )
+    listing.add_argument("--limit", type=int, default=20)
+    listing.add_argument("--json", action="store_true", help="print them as JSON")
+    listing.set_defaults(handler=cmd_evaluations)
+
+    for name, text in (
+        ("publish", "put a ranked evaluation on its suite's public leaderboard"),
+        ("withdraw", "take an evaluation off the public leaderboard"),
+    ):
+        change = commands.add_parser(name, help=text)
+        server(change)
+        change.add_argument("evaluation", help="the evaluation's id")
+        change.set_defaults(handler=cmd_publication)
+
+    promote_cmd = commands.add_parser("promote", help="rank a result recorded without a suite on a suite")
+    server(promote_cmd)
+    promote_cmd.add_argument("evaluation", help="the id of the evaluation (or test result) to copy")
+    promote_cmd.add_argument("--suite", required=True, help="slug@version")
+    checkpoint_args(promote_cmd)
+    promote_cmd.set_defaults(handler=cmd_promote)
 
     version = commands.add_parser("version", help="print the version")
     version.set_defaults(handler=cmd_version)

@@ -30,7 +30,9 @@ tests/
 ├── test_offline.py       offline mode end to end: a run written to disk, then visin.sync()
 ├── test_api.py           Api and the models it returns: paging, finding runs, epochs, test results, DataFrames
 ├── test_system.py        system_info() and system_metrics(): nvidia-smi, PyTorch, psutil, /proc
-├── test_cli.py           the visin command: check, sync, runs, version
+├── test_cli.py           the visin command: check, sync, runs, suites, evaluate, leaderboard, publish, promote, version
+├── test_evaluation.py    visin.evaluate, checkpoints, promote, publish: what is sent, kept on disk, refused
+├── test_suites.py        reading a suite file and publishing it
 │
 ├── internal/             visin._internal, one file per module
 │   ├── test_config.py    environment variables, modes, overrides

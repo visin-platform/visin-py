@@ -22,6 +22,7 @@ from typing import Any
 
 from .. import system as _system
 from .inputs import epoch_number, now
+from .providers import HUB
 
 logger = logging.getLogger("visin")
 
@@ -153,7 +154,7 @@ def benchmark_payload(
 
 def model_payload(repo: str, revision: str, *, path: str | None, epoch: int | float | None) -> dict[str, Any]:
     """The body that links a Hub model to a run: a pointer pinned to one commit."""
-    body: dict[str, Any] = {"provider": "hf", "kind": "model", "repo": repo, "revision": revision}
+    body: dict[str, Any] = {"provider": HUB, "kind": "model", "repo": repo, "revision": revision}
     if path:
         body["path"] = path
     if epoch is not None:

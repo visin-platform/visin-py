@@ -37,6 +37,7 @@ from urllib.parse import quote
 
 from ._internal import hub
 from ._internal.config import HOSTED_DATASET_URL, read_settings
+from ._internal.providers import HUB
 from ._internal.transport import HttpClient
 from .errors import ApiError, ConfigurationError, VisinError
 from .models import Dataset
@@ -280,7 +281,7 @@ class Datasets:
             self._client.request(
                 "PATCH",
                 f"/datasets/{quote(dataset.id, safe='')}",
-                json={"source": {"repo": repo, "revision": revision}},
+                json={"source": {"provider": HUB, "repo": repo, "revision": revision}},
             )
         except ApiError as exc:
             raise VisinError(
@@ -322,7 +323,7 @@ class Datasets:
                     "revision": revision,
                     "size": None,
                     "file": None,
-                    "source": {"provider": "hf", "repo": repo, "revision": revision},
+                    "source": {"provider": HUB, "repo": repo, "revision": revision},
                 }
             )
         )

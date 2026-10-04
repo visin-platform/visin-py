@@ -32,6 +32,7 @@ nav:
       - Offline and unreliable networks: guides/offline.md
       - Recipes: guides/recipes.md
       - Keras, Lightning and Hugging Face: guides/frameworks.md
+      - Evaluating and ranking models: guides/evaluation.md
       - Reading runs back: guides/reading.md
       - Datasets: guides/datasets.md
       - The visin command: guides/cli.md
@@ -41,6 +42,7 @@ nav:
       - Run and init: reference/run.md
       - The current run: reference/shortcuts.md
       - Api: reference/api.md
+      - Evaluation and suites: reference/evaluation.md
       - Datasets: reference/datasets.md
       - Offline and sync: reference/offline.md
       - System information: reference/system.md

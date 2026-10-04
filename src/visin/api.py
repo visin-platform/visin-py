@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from ._internal.config import HOSTED_URL, read_settings
+from ._internal.reports import digest_of
 from ._internal.transport import HttpClient
 from .errors import ConfigurationError
 from .models import (
@@ -28,16 +30,23 @@ from .models import (
     Comparison,
     Configuration,
     Epoch,
+    Evaluation,
     Finding,
+    Leaderboard,
+    LeaderboardEntry,
     Project,
+    Suite,
     Summary,
     TestResult,
     Training,
     Visualization,
 )
+from .suites import parse_suite_ref, protocol_of
 
 # The server's cap on one page.
 MAX_PAGE_SIZE = 1000
+# The server's cap on one page of leaderboard rows.
+LEADERBOARD_PAGE = 100
 # The server's cap on one page of findings.
 FINDINGS_PAGE = 200
 
@@ -106,13 +115,26 @@ class Api:
     def _get(self, path: str, **params: Any) -> Any:
         return self._client.request("GET", path, params={k: v for k, v in params.items() if v is not None})
 
+    def _get_public(self, path: str, **params: Any) -> Any:
+        return self._client.request(
+            "GET", path, params={k: v for k, v in params.items() if v is not None}, anonymous=True
+        )
+
     def _pages(
-        self, path: str, key: str, params: Mapping[str, Any], page_size: int
+        self,
+        path: str,
+        key: str,
+        params: Mapping[str, Any],
+        page_size: int,
+        *,
+        public: bool = False,
+        cap: int = MAX_PAGE_SIZE,
     ) -> Iterator[dict[str, Any]]:
+        read = self._get_public if public else self._get
         page = 1
-        size = max(1, min(page_size, MAX_PAGE_SIZE))
+        size = max(1, min(page_size, cap))
         while True:
-            data = self._get(path, **params, page=page, limit=size) or {}
+            data = read(path, **params, page=page, limit=size) or {}
             items = data.get(key) or []
             yield from items
             pages = (data.get("pagination") or {}).get("pages")
@@ -286,9 +308,9 @@ class Api:
         return [Epoch.from_json(item) for item in pages]
 
     def test_results(self, ref: str | Training) -> list[TestResult]:
-        """The run's test results, newest first."""
+        """What the run's checkpoints scored, newest first: its test results, with or without a suite."""
         uuid = self._uuid(ref)
-        pages = self._pages("/test-results", "testResults", {"training_uuid": uuid}, 500)
+        pages = self._pages("/evaluations", "evaluations", {"trainingUuid": uuid, "include": "results"}, 500)
         return [TestResult.from_json(item) for item in pages]
 
     def benchmarks(
@@ -308,6 +330,193 @@ class Api:
     @staticmethod
     def _uuid(ref: str | Training) -> str:
         return ref.uuid if isinstance(ref, Training) else ref
+
+    # ---------------------------------------------------------------- suites and evaluations
+
+    def suites(
+        self, *, slug: str | None = None, project: str | None = None, include_archived: bool = False
+    ) -> list[Suite]:
+        """The suites this credential can read, newest version first within a name.
+
+        A suite is readable by whoever can read its project, and by anyone when it is public. Archived suites
+        (retired: no new results) are left out unless ``include_archived`` is true.
+        """
+        params: dict[str, Any] = {"slug": slug, "projectId": project}
+        if include_archived:
+            params["includeArchived"] = "true"
+        return [Suite.from_json(item) for item in self._pages("/suites", "suites", params, 100)]
+
+    def suite(self, ref: str, version: int | str | None = None) -> Suite:
+        """One suite, by ``"slug@1"``, by slug and version, or by slug alone for the latest."""
+        slug, found = parse_suite_ref(ref) if version is None else (ref, str(version))
+        return Suite.from_json(self._get(f"/suites/{quote(slug, safe='')}/{quote(found, safe='')}") or {})
+
+    def evaluations(
+        self,
+        *,
+        project: str | None = None,
+        suite: str | None = None,
+        state: str | None = None,
+        status: str | None = None,
+        checkpoint_key: str | None = None,
+    ) -> list[Evaluation]:
+        """Evaluations this credential can read, newest first, without their results and provenance.
+
+        ``suite`` is ``"slug@version"``. ``state`` keeps one verdict (``eligible``, ``incomplete``,
+        ``incompatible``, ``exploratory``, ``legacy-unverified``); open an evaluation with
+        :meth:`evaluation` for its results.
+        """
+        params = {
+            "projectId": project,
+            "suite": suite,
+            "state": state,
+            "status": status,
+            "checkpointKey": checkpoint_key,
+        }
+        return [
+            Evaluation.from_json(item) for item in self._pages("/evaluations", "evaluations", params, 100)
+        ]
+
+    def evaluation(self, ref: str | Evaluation, *, project: str | None = None) -> Evaluation:
+        """One evaluation, with its results and provenance, by id or (with ``project``) by your own uuid.
+
+        Use the uuid form to recover after a lost response: it finds what an earlier attempt stored.
+        """
+        if isinstance(ref, Evaluation):
+            ref = ref.id or ""
+        if project is not None:
+            return Evaluation.from_json(
+                self._get(f"/evaluations/uuid/{quote(ref, safe='')}", projectId=project) or {}
+            )
+        return Evaluation.from_json(self._get(f"/evaluations/{quote(ref, safe='')}") or {})
+
+    def check_protocol(self, source: str | Path | Mapping[str, Any]) -> str:
+        """The digest Visin gives a protocol file or dict, without publishing it."""
+        return digest_of(self._client, protocol_of(source))
+
+    def leaderboard(
+        self,
+        ref: str,
+        version: int | str | None = None,
+        *,
+        page: int | None = None,
+        limit: int | None = None,
+        unranked_page: int | None = None,
+        all_pages: bool = False,
+        observed: bool = False,
+    ) -> Leaderboard:
+        """The ranking of a suite version over the evaluations this credential can read.
+
+        One entry per checkpoint, from its latest ranked attempt, never its best. ``candidates`` says how many
+        evaluations were in the pool: a rank is a position in that pool, and ranks are global, so page 2 does
+        not restart at 1. ``pagination.total`` is how many checkpoints were selected. What has attempts but
+        none ranked is in ``unranked``, with the reasons, and pages apart from the ranking
+        (``unranked_page``).
+
+        ``page`` and ``limit`` (at most 100) choose one page. ``all_pages=True`` reads every page of both
+        lists and returns them together with ``complete`` set; it cannot be combined with ``page``.
+
+        ``observed=True`` ranks only the results whose evaluator sent complete evidence that matched; the
+        pool, its counts and the ranks are then those of that subset, and ``reported`` and promoted results
+        are left out.
+        """
+        slug, found = parse_suite_ref(ref) if version is None else (ref, str(version))
+        path = f"/suites/{quote(slug, safe='')}/{quote(found, safe='')}/leaderboard"
+        evidence = "observed" if observed else None
+        if all_pages:
+            return self._whole_board(path, page, unranked_page, limit, public=False, evidence=evidence)
+        return Leaderboard.from_json(
+            self._get(path, page=page, limit=limit, unrankedPage=unranked_page, evidence=evidence) or {}
+        )
+
+    def public_leaderboards(
+        self, *, page: int | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """One page of the leaderboards with something published, anonymously: the same list whoever asks.
+
+        The server sends 100 at most per page; ``iter_public_leaderboards`` reads them all.
+        """
+        data = self._get_public("/public/leaderboards", page=page, limit=limit) or {}
+        return [dict(item) for item in data.get("leaderboards") or ()]
+
+    def iter_public_leaderboards(self, *, page_size: int = LEADERBOARD_PAGE) -> Iterator[dict[str, Any]]:
+        """Every public leaderboard, anonymously, reading page after page."""
+        return self._pages(
+            "/public/leaderboards", "leaderboards", {}, page_size, public=True, cap=LEADERBOARD_PAGE
+        )
+
+    def public_leaderboard(
+        self,
+        ref: str,
+        version: int | str | None = None,
+        *,
+        page: int | None = None,
+        limit: int | None = None,
+        all_pages: bool = False,
+        observed: bool = False,
+    ) -> Leaderboard:
+        """One public leaderboard, anonymously: only published results, and a version number is required.
+
+        Paged and global-ranked like ``leaderboard``; there is no ``unranked`` list on the public view.
+        ``observed=True`` ranks only the results whose evaluator sent complete evidence that matched.
+        """
+        slug, found = parse_suite_ref(ref) if version is None else (ref, str(version))
+        if found == "latest":
+            raise ValueError("a public leaderboard is addressed by a version, such as road-test@1")
+        path = f"/public/leaderboards/{quote(slug, safe='')}/{quote(found, safe='')}"
+        evidence = "observed" if observed else None
+        if all_pages:
+            return self._whole_board(path, page, None, limit, public=True, evidence=evidence)
+        return Leaderboard.from_json(
+            self._get_public(path, page=page, limit=limit, evidence=evidence) or {}, public=True
+        )
+
+    def _whole_board(
+        self,
+        path: str,
+        page: int | None,
+        unranked_page: int | None,
+        limit: int | None,
+        *,
+        public: bool,
+        evidence: str | None = None,
+    ) -> Leaderboard:
+        """Every page of a ranking, and of its unranked list when it has one, merged into one board.
+
+        Rows are de-duplicated by evaluation id, since a write between two requests can move a row across a
+        page boundary.
+        """
+        if page is not None or unranked_page is not None:
+            raise ValueError("all_pages reads every page: leave page and unranked_page out")
+        read = self._get_public if public else self._get
+        size = max(1, min(limit or LEADERBOARD_PAGE, LEADERBOARD_PAGE))
+        first = Leaderboard.from_json(read(path, page=1, limit=size, evidence=evidence) or {}, public=public)
+        entries = {entry.evaluation_id: entry for entry in first.entries}
+        raw_entries = list(first.raw.get("entries") or ())
+        for number in range(2, (first.pagination.pages if first.pagination else 0) + 1):
+            more = read(path, page=number, limit=size, evidence=evidence) or {}
+            for item in more.get("entries") or ():
+                entry = LeaderboardEntry.from_json(item)
+                if entry.evaluation_id not in entries:
+                    entries[entry.evaluation_id] = entry
+                    raw_entries.append(item)
+        unranked = list(first.unranked)
+        seen = {row.get("evaluationId") for row in unranked}
+        pages = first.unranked_pagination.pages if first.unranked_pagination else 0
+        beyond = (first.pagination.pages if first.pagination else 0) + 1
+        for number in range(2, pages + 1):
+            more = read(path, page=beyond, limit=size, unrankedPage=number, evidence=evidence) or {}
+            for row in more.get("unranked") or ():
+                if row.get("evaluationId") not in seen:
+                    seen.add(row.get("evaluationId"))
+                    unranked.append(dict(row))
+        return replace(
+            first,
+            entries=tuple(entries.values()),
+            unranked=tuple(unranked),
+            complete=True,
+            raw={**first.raw, "entries": raw_entries, "unranked": unranked},
+        )
 
     # ---------------------------------------------------------------- frames
 

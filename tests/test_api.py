@@ -1,6 +1,7 @@
 import pytest
 from fakes import ok
 
+import visin
 from visin import Api, Training, flatten
 from visin.errors import ConfigurationError
 
@@ -72,13 +73,29 @@ def test_epochs_of_a_run(api, session):
 
 
 def test_test_results_and_benchmarks_filter_by_the_runs_uuid(api, session):
-    session.route("GET", "/test-results", ok({"testResults": [{"test_uuid": "a", "test_results": {"x": 1}}]}))
+    session.route(
+        "GET",
+        "/evaluations",
+        ok(
+            {
+                "evaluations": [
+                    {"uuid": "a", "results": {"x": 1}, "source": {"epochUuid": "e1"}, "run": {"uuid": "u1"}}
+                ]
+            }
+        ),
+    )
     session.route("GET", "/benchmarks", ok({"benchmarks": [{"_id": "b", "results": [1]}]}))
     [result] = api.test_results(RUN)
-    assert (result.test_uuid, result.results) == ("a", {"x": 1})
+    assert (result.test_uuid, result.results, result.epoch_uuid, result.training_uuid) == (
+        "a",
+        {"x": 1},
+        "e1",
+        "u1",
+    )
     [bench] = api.benchmarks("u1", project="p")
     assert (bench.id, bench.results) == ("b", [1])
-    assert session.calls[0]["params"]["training_uuid"] == "u1"
+    assert session.calls[0]["params"]["trainingUuid"] == "u1"
+    assert session.calls[0]["params"]["include"] == "results"
     assert session.calls[1]["params"]["projectId"] == "p"
 
 
@@ -412,3 +429,336 @@ def test_metric_direction_matches_platform_full_path_precedence(full_first):
     )
     assert project.direction("val.score") == "lower"
     assert project.direction("train.score") == "higher"
+
+
+SUITE_JSON = {
+    "_id": "s1",
+    "slug": "road-test",
+    "version": 2,
+    "name": "Road test",
+    "projectId": "p1",
+    "visibility": "public",
+    "digest": "d" * 64,
+    "protocol": {
+        "metrics": [
+            {"key": "mIoU", "direction": "max", "unit": "ratio", "headline": True},
+            {"key": "ap", "direction": "max"},
+        ]
+    },
+}
+
+
+class TestSuitesAndEvaluations:
+    def test_suites_are_paged_filtered_and_archived_ones_are_left_out_unless_asked(self, api, session):
+        session.route("GET", "/suites", page("suites", [SUITE_JSON], 1, 1), page("suites", [], 1, 1))
+        [suite] = api.suites(slug="road-test", project="road-seg")
+        params = session.calls[0]["params"]
+        assert (
+            params["slug"] == "road-test"
+            and params["projectId"] == "road-seg"
+            and "includeArchived" not in params
+        )
+        assert (suite.ref, suite.visibility, suite.headline["key"], suite.archived_at) == (
+            "road-test@2",
+            "public",
+            "mIoU",
+            None,
+        )
+        api.suites(include_archived=True)
+        assert session.calls[-1]["params"]["includeArchived"] == "true"
+
+    @pytest.mark.parametrize(
+        ("args", "path"),
+        [
+            (("road-test@2",), "/suites/road-test/2"),
+            (("road-test",), "/suites/road-test/latest"),
+            (("road-test", 3), "/suites/road-test/3"),
+        ],
+    )
+    def test_a_suite_is_read_by_ref_by_slug_alone_or_by_slug_and_version(self, api, session, args, path):
+        session.route("GET", path, ok(SUITE_JSON))
+        assert api.suite(*args).slug == "road-test"
+        assert session.paths("GET") == [path]
+
+    def test_a_suite_without_a_headline_metric_has_an_empty_one(self):
+        assert (
+            visin.Suite.from_json(
+                {"slug": "s", "version": 1, "name": "n", "protocol": {"metrics": [{"key": "x"}]}}
+            ).headline
+            == {}
+        )
+
+    def test_evaluations_are_paged_and_filtered_and_read_as_python_names(self, api, session):
+        item = {
+            "_id": "e1",
+            "uuid": "u1",
+            "projectId": "p1",
+            "checkpoint": {"kind": "local", "label": "x"},
+            "suite": {"slug": "road-test", "version": 1, "digest": "d"},
+            "sampleCounts": {"day": 3},
+            "publishedAt": "2026-10-02T09:00:00Z",
+            "validation": {"state": "eligible", "reasons": [], "warnings": []},
+        }
+        session.route("GET", "/evaluations", page("evaluations", [item], 1, 1))
+        [evaluation] = api.evaluations(
+            project="road-seg", suite="road-test@1", state="eligible", status="completed", checkpoint_key="k"
+        )
+        params = session.calls[0]["params"]
+        assert (
+            params["projectId"],
+            params["suite"],
+            params["state"],
+            params["status"],
+            params["checkpointKey"],
+        ) == ("road-seg", "road-test@1", "eligible", "completed", "k")
+        assert (
+            evaluation.id,
+            evaluation.suite,
+            evaluation.sample_counts,
+            evaluation.published,
+            evaluation.ranked,
+        ) == ("e1", "road-test@1", {"day": 3}, True, True)
+
+    def test_one_evaluation_by_id_by_object_or_by_the_uuid_the_writer_gave_it(self, api, session):
+        session.route("GET", "/evaluations/e1", ok({"_id": "e1", "results": {"day": {}}}), ok({"_id": "e1"}))
+        assert api.evaluation("e1").results == {"day": {}}
+        assert api.evaluation(visin.Evaluation(id="e1")).id == "e1"
+        session.route("GET", "/evaluations/uuid/mine", ok({"_id": "e2", "uuid": "mine"}))
+        assert api.evaluation("mine", project="road-seg").uuid == "mine"
+        assert session.calls[-1]["params"] == {"projectId": "road-seg"}
+
+    def test_the_ranking_reads_with_its_scope_and_what_could_not_be_ranked(self, api, session):
+        board = {
+            "suite": {"slug": "road-test", "version": 1, "headline": {"key": "mIoU", "direction": "max"}},
+            "scope": {"candidates": 4},
+            "entries": [
+                {
+                    "rank": 1,
+                    "evaluationId": "e1",
+                    "attempts": 2,
+                    "checkpoint": {"kind": "hf", "repo": "acme/clft", "commit": "3f2a1c9d8e"},
+                    "project": {"name": "Road"},
+                    "summary": {
+                        "headline": {"value": 0.74},
+                        "worst": {"condition": "night", "value": 0.7},
+                        "gap": 0.04,
+                    },
+                }
+            ],
+            "unranked": [
+                {
+                    "checkpointKey": "k",
+                    "state": "incomplete",
+                    "reasons": [{"code": "missing-condition", "detail": "rain"}],
+                }
+            ],
+        }
+        session.route("GET", "/suites/road-test/1/leaderboard", ok(board))
+        result = api.leaderboard("road-test@1")
+        [entry] = result.entries
+        assert (result.suite, result.headline_key, result.direction, result.candidates, result.public) == (
+            "road-test@1",
+            "mIoU",
+            "max",
+            4,
+            False,
+        )
+        assert (
+            entry.rank,
+            entry.name,
+            entry.headline,
+            entry.worst_condition,
+            entry.worst_value,
+            entry.gap,
+            entry.attempts,
+            entry.project,
+        ) == (1, "acme/clft @ 3f2a1c9", 0.74, "night", 0.7, 0.04, 2, "Road")
+        assert result.unranked[0]["state"] == "incomplete"
+
+    def test_the_public_ranking_has_the_flat_shape_and_asks_without_a_credential(self, api, session):
+        board = {
+            "suite": {"slug": "road-test", "version": 1, "headline": {"key": "mIoU", "direction": "min"}},
+            "scope": {"candidates": 1},
+            "entries": [
+                {
+                    "rank": 1,
+                    "evaluationId": "e1",
+                    "checkpoint": {"kind": "local", "label": "Model B"},
+                    "headline": 0.5,
+                    "worst": {"condition": "day", "value": 0.6},
+                    "gap": 0.1,
+                }
+            ],
+        }
+        session.route("GET", "/public/leaderboards/road-test/1", ok(board))
+        result = api.public_leaderboard("road-test@1")
+        assert result.public and result.entries[0].name == "Model B" and result.entries[0].headline == 0.5
+        assert result.entries[0].attempts == 0 and result.entries[0].project is None and result.unranked == ()
+
+    def test_a_public_leaderboard_needs_a_version_because_a_link_should_keep_meaning_one_protocol(self, api):
+        with pytest.raises(ValueError, match="version"):
+            api.public_leaderboard("road-test")
+
+    def test_the_public_list_is_read_anonymously(self, api, session):
+        session.route(
+            "GET", "/public/leaderboards", ok({"leaderboards": [{"slug": "road-test", "version": 1}]})
+        )
+        assert api.public_leaderboards() == [{"slug": "road-test", "version": 1}]
+
+    @staticmethod
+    def ranking_page(number, *, selected=230, unranked=130, size=100, public=False):
+        start = (number - 1) * size
+        entries = [
+            {
+                "rank": index // 2 + 1,
+                "evaluationId": f"e{index}",
+                "attempts": 3,
+                "checkpoint": {"kind": "local", "label": f"m{index}"},
+                "summary": {
+                    "headline": {"value": 1 - index / 1000},
+                    "worst": {"condition": "d", "value": 0.1},
+                    "gap": 0.1,
+                },
+            }
+            for index in range(start, min(start + size, selected))
+        ]
+        body = {
+            "suite": {"slug": "road-test", "version": 1, "headline": {"key": "mIoU", "direction": "max"}},
+            "scope": {"candidates": selected * 3},
+            "entries": entries,
+            "pagination": {"page": number, "limit": size, "total": selected, "pages": -(-selected // size)},
+        }
+        if not public:
+            body["unranked"] = [
+                {"evaluationId": f"u{i}", "checkpointKey": f"k{i}", "state": "incomplete"}
+                for i in range(unranked)
+            ][:size]
+            body["unrankedPagination"] = {
+                "page": 1,
+                "limit": size,
+                "total": unranked,
+                "pages": -(-unranked // size),
+            }
+        return body
+
+    def test_a_page_of_the_ranking_keeps_global_ranks_and_says_where_it_sits(self, api, session):
+        session.route("GET", "/suites/road-test/1/leaderboard", ok(self.ranking_page(3)))
+        result = api.leaderboard("road-test@1", page=3, limit=100, unranked_page=2)
+        assert session.calls[-1]["params"] == {"page": 3, "limit": 100, "unrankedPage": 2}
+        assert result.pagination == visin.Pagination(page=3, limit=100, total=230, pages=3)
+        assert result.unranked_pagination == visin.Pagination(page=1, limit=100, total=130, pages=2)
+        assert (result.candidates, len(result.entries), result.entries[0].rank, result.complete) == (
+            690,
+            30,
+            101,
+            False,
+        )
+
+    def test_observed_asks_for_the_observed_results_alone_on_every_way_of_reading_a_board(self, api, session):
+        session.route(
+            "GET", "/suites/road-test/1/leaderboard", ok(self.ranking_page(1, selected=3, unranked=0))
+        )
+        api.leaderboard("road-test@1", observed=True)
+        assert session.calls[-1]["params"] == {"evidence": "observed"}
+        session.route(
+            "GET", "/suites/road-test/1/leaderboard", ok(self.ranking_page(1, selected=3, unranked=0))
+        )
+        api.leaderboard("road-test@1", observed=True, all_pages=True)
+        assert session.calls[-1]["params"]["evidence"] == "observed"
+        session.route(
+            "GET", "/public/leaderboards/road-test/1", ok(self.ranking_page(1, selected=3, public=True))
+        )
+        api.public_leaderboard("road-test@1", observed=True)
+        assert session.calls[-1]["params"] == {"evidence": "observed"}
+
+    def test_every_page_of_an_observed_board_keeps_asking_for_the_observed_results(self, api, session):
+        session.route(
+            "GET",
+            "/suites/road-test/1/leaderboard",
+            *[ok(self.ranking_page(n)) for n in (1, 2, 3)],
+            ok(self.ranking_page(4)),
+        )
+        api.leaderboard("road-test@1", observed=True, all_pages=True)
+        assert [call["params"].get("evidence") for call in session.calls] == ["observed"] * 4
+
+    def test_asking_for_no_page_sends_no_paging_parameters(self, api, session):
+        session.route("GET", "/suites/road-test/1/leaderboard", ok(self.ranking_page(1)))
+        api.leaderboard("road-test@1")
+        assert session.calls[-1]["params"] == {}
+
+    def test_every_page_of_more_than_a_hundred_checkpoints_comes_back_together(self, api, session):
+        session.route(
+            "GET",
+            "/suites/road-test/1/leaderboard",
+            *[ok(self.ranking_page(n)) for n in (1, 2, 3)],
+            ok(self.ranking_page(4, selected=230, unranked=130)),
+        )
+        result = api.leaderboard("road-test@1", all_pages=True)
+        assert [call["params"] for call in session.calls] == [
+            {"page": 1, "limit": 100},
+            {"page": 2, "limit": 100},
+            {"page": 3, "limit": 100},
+            {"page": 4, "limit": 100, "unrankedPage": 2},
+        ]
+        assert result.complete and len(result.entries) == 230 and len(result.unranked) == 100
+        assert [entry.rank for entry in result.entries[:4]] == [1, 1, 2, 2] and result.entries[-1].rank == 115
+        assert len({entry.evaluation_id for entry in result.entries}) == 230
+        assert (
+            len(result.raw["entries"]) == 230 and result.candidates == 690 and result.pagination.total == 230
+        )
+
+    def test_a_row_that_moved_across_a_page_boundary_is_not_counted_twice(self, api, session):
+        first = self.ranking_page(1, selected=150, unranked=0)
+        second = self.ranking_page(2, selected=150, unranked=0)
+        second["entries"].insert(0, first["entries"][-1])
+        session.route("GET", "/suites/road-test/1/leaderboard", ok(first), ok(second))
+        assert len(api.leaderboard("road-test@1", all_pages=True).entries) == 100 + 50
+
+    def test_all_pages_refuses_to_be_mixed_with_one_page(self, api):
+        with pytest.raises(ValueError, match="every page"):
+            api.leaderboard("road-test@1", all_pages=True, page=2)
+        with pytest.raises(ValueError, match="every page"):
+            api.leaderboard("road-test@1", all_pages=True, unranked_page=2)
+        with pytest.raises(ValueError, match="every page"):
+            api.public_leaderboard("road-test@1", all_pages=True, page=1)
+
+    def test_the_public_ranking_pages_anonymously_and_reads_all_pages(self, api, session):
+        session.route("GET", "/public/leaderboards/road-test/1", ok(self.ranking_page(2, public=True)))
+        one = api.public_leaderboard("road-test@1", page=2, limit=50)
+        assert session.calls[-1]["params"] == {"page": 2, "limit": 50}
+        assert one.public and one.unranked_pagination is None
+        session.route(
+            "GET",
+            "/public/leaderboards/road-test/1",
+            *[ok(self.ranking_page(n, public=True)) for n in (1, 2, 3)],
+        )
+        result = api.public_leaderboard("road-test@1", all_pages=True)
+        assert result.public and result.complete and len(result.entries) == 230 and result.unranked == ()
+
+    def test_public_discovery_pages_and_iterates_every_page(self, api, session):
+        def listing(number, count):
+            items = [{"slug": f"s{number}-{i}", "version": 1} for i in range(count)]
+            return ok(
+                {
+                    "leaderboards": items,
+                    "pagination": {"page": number, "limit": 100, "total": 250, "pages": 3},
+                }
+            )
+
+        session.route("GET", "/public/leaderboards", listing(2, 3))
+        assert len(api.public_leaderboards(page=2, limit=3)) == 3
+        assert session.calls[-1]["params"] == {"page": 2, "limit": 3}
+        session.route("GET", "/public/leaderboards", listing(1, 100), listing(2, 100), listing(3, 50))
+        everything = list(api.iter_public_leaderboards())
+        assert len(everything) == 250 and everything[-1]["slug"] == "s3-49"
+        assert [call["params"] for call in session.calls[-3:]] == [
+            {"page": 1, "limit": 100},
+            {"page": 2, "limit": 100},
+            {"page": 3, "limit": 100},
+        ]
+
+    def test_an_unnamed_checkpoint_reads_as_unknown(self):
+        entry = visin.LeaderboardEntry.from_json(
+            {"rank": 1, "evaluationId": "e", "headline": 1, "worst": {}, "gap": 0}
+        )
+        assert entry.name == "unknown"

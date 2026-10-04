@@ -457,10 +457,11 @@ class Run:
     ) -> str | None:
         """Record scores on held-out data against an epoch of this run.
 
-        ``test_results`` has three levels: conditions (``day``, ``night``, one
-        per test set), classes inside them, and metrics inside those. An
-        ``overall`` key holds metrics for a whole condition, or at the top level
-        for the whole test. Returns the result's UUID.
+        Visin keeps them as an evaluation with no suite: a result that is stored and shown but not
+        ranked (see :func:`visin.evaluate` to score a checkpoint on a suite). ``test_results`` has three
+        levels: conditions (``day``, ``night``, one per test set), classes inside them, and metrics
+        inside those. An ``overall`` key holds metrics for a whole condition, or at the top level for
+        the whole test. Returns the result's UUID.
 
         ``epoch_uuid`` names the epoch directly, for one this package did not
         log: an epoch recorded by other code, whose UUID a checkpoint's file
@@ -473,7 +474,7 @@ class Run:
                 raise ValueError("log_test_results needs test_results")
             number = epoch_number(epoch)
             # Generated here, not by the server, so a retried POST is answered
-            # 409 instead of storing the result twice.
+            # with the stored result instead of storing it twice.
             test_uuid = test_uuid or str(uuidlib.uuid4())
             body = self._jsonable(
                 {
@@ -488,7 +489,11 @@ class Run:
         except (TypeError, ValueError) as exc:
             self._handle(exc, "log test results")
             return None
-        return test_uuid if self._emit({"op": "test_result", "body": body}) else None
+        return (
+            test_uuid
+            if self._emit({"op": "test_result", "training_uuid": self.training_uuid, "body": body})
+            else None
+        )
 
     def log_benchmark(
         self,

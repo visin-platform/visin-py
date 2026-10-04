@@ -76,6 +76,15 @@ def test_dataset_reads_follow_the_service_contract(client, session):
         jsonschema.Draft202012Validator(schema).validate({"success": True, "data": response})
 
 
+def _variant_properties(schema):
+    """The property names of every object variant of a schema, however deeply anyOf and oneOf nest them."""
+    if "properties" in schema:
+        yield set(schema["properties"])
+    for key in ("anyOf", "oneOf"):
+        for branch in schema.get(key, ()):
+            yield from _variant_properties(branch)
+
+
 def test_publishing_a_dataset_sends_what_the_service_accepts(client, session, hf, monkeypatch, tmp_path):
     path = Path(os.environ.get("VISIN_DATASET_OPENAPI") or DEFAULT_DATASET_SPEC)
     if not path.exists():
@@ -99,7 +108,5 @@ def test_publishing_a_dataset_sends_what_the_service_accepts(client, session, hf
     assert template == "/datasets/{id}"
     schema = resolve(operation["requestBody"]["content"]["application/json"]["schema"], spec)
     jsonschema.Draft202012Validator(schema).validate(call["json"])
-    known = next(
-        branch["properties"] for branch in schema["properties"]["source"]["anyOf"] if "properties" in branch
-    )
-    assert set(call["json"]["source"]) <= set(known)
+    known = set().union(*_variant_properties(schema["properties"]["source"]))
+    assert set(call["json"]["source"]) <= known

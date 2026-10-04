@@ -8,6 +8,8 @@ Everything a script needs is importable from `visin` itself:
 | [`Run`](run.md#visin.run.Run) | A run: `log_epoch`, `log_test_results`, `log_benchmark`, `log_config`, `log_model`, `upload_visualization`, `update`, `finish`. |
 | [`get_run`](run.md#visin.run.get_run), [`log_epoch`](shortcuts.md), … | Log through the current run, from code that was not handed the `Run`. |
 | [`Api`](api.md#visin.api.Api) | Read projects, runs, epochs, test results and benchmarks. |
+| [`evaluate`](evaluation.md#visin.evaluation.evaluate), [`local_checkpoint`](evaluation.md#visin.evaluation.local_checkpoint), [`push_suite`](evaluation.md#visin.suites.push_suite) | Record how a checkpoint scored on a suite, and get Visin's verdict on whether it can be ranked. |
+| [`promote`](evaluation.md#visin.evaluation.promote), [`publish`](evaluation.md#visin.evaluation.publish), [`withdraw`](evaluation.md#visin.evaluation.withdraw) | Rank an older result, and put a ranked one on the public leaderboard, or take it off. |
 | [`Datasets`](datasets.md#visin.datasets.Datasets) | List and download the datasets Visin hosts. |
 | [`sync`](offline.md#visin.offline.sync), [`pending`](offline.md#visin.offline.pending) | Send reports kept on disk, or list them. |
 | [`system_info`](system.md#visin.system.system_info), [`system_metrics`](system.md#visin.system.system_metrics) | Describe the machine, and what a run is using. |

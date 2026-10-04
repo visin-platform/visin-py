@@ -42,7 +42,8 @@ Visin's HTTP API is small, and you could post to it with `requests`. This packag
 - [Offline and unreliable networks](guides/offline.md): clusters, compute nodes and `visin sync`.
 - [Recipes](guides/recipes.md): SLURM, requeued jobs, Docker, CI and notebooks.
 - [Keras, Lightning and Hugging Face](guides/frameworks.md): one callback, no loop changes.
+- [Evaluating and ranking models](guides/evaluation.md): suites, checkpoints, verdicts, leaderboards and publishing.
 - [Reading runs back](guides/reading.md): runs and their epochs as dicts or a pandas DataFrame.
 - [Datasets](guides/datasets.md): list and download the datasets on Visin.
-- [The visin command](guides/cli.md): `login`, `check`, `sync`, `runs`, `datasets`, `download` and `cache`.
+- [The visin command](guides/cli.md): `login`, `check`, `sync`, `runs`, `datasets`, `download`, `cache`, and the evaluation commands.
 - [Troubleshooting](guides/troubleshooting.md): every warning visin logs, and what to do about it.

@@ -576,7 +576,7 @@ def test_a_visin_dataset_is_published_to_the_hub_and_visin_is_pointed_at_it(data
     assert upload["ignore_patterns"] == [MARKER]
     assert "camera/1.png" in upload["files"]
     (patch,) = [call for call in session.calls if call["method"] == "PATCH"]
-    assert patch["json"] == {"source": {"repo": "acme/zod-png", "revision": HUB_COMMIT}}
+    assert patch["json"] == {"source": {"provider": "hf", "repo": "acme/zod-png", "revision": HUB_COMMIT}}
 
 
 def test_a_public_repo_must_be_asked_for(datasets, session, hf):

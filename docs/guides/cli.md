@@ -72,6 +72,121 @@ Sends reports that were kept on disk, by an offline run or by a run that lost th
 
 It exits with status 1 if anything is still waiting afterwards.
 
+## visin suites
+
+Publishes, lists and shows scoring protocols. See [evaluating models](evaluation.md).
+
+```text
+$ visin suites push suites/road-test.json --project road-seg --public
+$ visin suites list --all
+$ visin suites show road-test@1
+$ visin suites digest suites/road-test.json
+```
+
+`digest FILE` prints the digest Visin gives a suite or protocol file without publishing it, which is what an evaluation
+sends as the protocol it ran. `manifest day=FILE night=FILE` prints the digest and sample counts of split files, for a suite's `data`; it needs no
+server. `push` reads JSON, or YAML with `pip install 'visin[yaml]'`. The project comes from `--project`, then the file, then
+`VISIN_PROJECT`, then the project a pipeline key is limited to. `--public` lets anyone read the protocol; `--private`
+(the default for a new suite) keeps it to the project's readers.
+
+## visin evaluate
+
+Records a checkpoint's results on a suite, from a JSON file of results.
+
+```text
+$ visin evaluate results.json --suite road-test@1 --checkpoint best.pth --sample-count day=1200 --sample-count night=800
+```
+
+| Option | |
+| --- | --- |
+| `--suite SLUG@VERSION` | The suite version. Required. |
+| `--checkpoint FILE`, `--label NAME` | The weights file that was loaded. Only its SHA-256 and the label are sent. |
+| `--hub-repo`, `--hub-commit`, `--hub-path` | A Hub checkpoint instead: repo, the full commit, and a file inside it. |
+| `--sample-count NAME=N`, `--sample-counts FILE` | Samples each condition scored. |
+| `--project`, `--run`, `--epoch` | The project, and the run and epoch the checkpoint came from. |
+| `--evaluator-package`, `--evaluator-version`, `--evaluator-commit` | What produced the numbers. Package and version are also sent as evidence (optional). |
+| `--data KIND=VALUE` | The data you read: `external=<manifest sha256>`, `visin=<archive sha256>` or `hf=org/name@<commit>`. |
+| `--protocol FILE`, `--protocol-digest SHA` | The suite or protocol file you ran (its digest is asked of Visin, at `visin sync` if offline), or the digest itself. |
+| `--classes-scored A,B`, `--classes-ignored C` | The classes you scored and left out. |
+| `--uuid`, `--supersedes ID` | Your id, to make a repeat harmless; the evaluation this one corrects. |
+| `--dry-run` | Judge it and store nothing. |
+| `--require-ranked` | Exit 3 when it is not ranked, for CI. |
+| `--json` | Print the outcome as JSON. |
+
+It exits 0 when recorded or checked, 1 when refused or unusable, and 3 with `--require-ranked` for a result that is
+not ranked.
+
+## visin leaderboard
+
+```text
+$ visin leaderboard road-test@1
+$ visin leaderboard road-test@1 --public
+$ visin leaderboard road-test@1 --page 2 --limit 50
+$ visin leaderboard road-test@1 --all
+```
+
+The ranking of a suite version, with where each model is weakest and what could not be ranked. `--public` reads the
+anonymous ranking of published results. `--json` prints it as JSON.
+
+The server sends at most 100 checkpoints per page. Without a flag you get the first page, and a line under the table
+says which page that is and how many checkpoints there are in all. Ranks are global, so page 2 starts at the rank the
+whole pool gives it, never at 1.
+
+| Option | Meaning |
+| --- | --- |
+| `--observed` | Rank only results whose evaluator sent complete evidence. |
+| `--page N`, `--limit N` | One page of ranked checkpoints (`--limit` at most 100). |
+| `--unranked-page N` | One page of the unranked list, which pages apart from the ranking. Not for `--public`. |
+| `--all` | Read every page of both lists. Cannot be combined with `--page` or `--unranked-page`. |
+
+## visin diff
+
+Fails a CI job when one evaluation scores worse than another on the same suite version.
+
+```text
+$ visin diff BASELINE CANDIDATE --max-drop 0.01
+road-test@1: 6ab5932a0e9a6b7570e30e30 against 6ab5932a0e9a6b7570e30e2e (allowed drop 0.01)
+  improved   overall               mIoU_foreground  0.7 -> 0.72  +0.02
+  ok         day                   mIoU_foreground  0.8 -> 0.795  -0.005
+  regressed  night                 mIoU_foreground  0.6 -> 0.55  -0.05
+  FAILED
+```
+
+Both are evaluation ids (from `visin evaluations`), or uuids with `--project`. The headline metric is compared for the
+overall figure and for every condition; `--all-metrics` compares every metric the suite names. Each score is read in
+the suite's direction, so for a latency a rise is the regression. A score may fall by `--max-drop` (in its own units,
+default 0) before it counts. Only ranked results are compared, and only on one suite version: a different version or
+protocol is refused, since it is a different measurement.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | Nothing fell by more than `--max-drop`. |
+| 1 | Refused or unusable: an unknown evaluation, two suite versions, a bad argument. |
+| 4 | A score regressed past `--max-drop`. |
+| 5 | A score could not be compared: a condition one side lacks, or an evaluation that is not ranked. Takes precedence over 4, since the comparison is then incomplete. |
+
+`--json` prints every compared score for scripts.
+
+## visin evaluations
+
+```text
+$ visin evaluations --project road-seg --suite road-test@1 --state incomplete --limit 10
+```
+
+Lists evaluations with their verdicts, and marks those on the public leaderboard.
+
+## visin publish, withdraw and promote
+
+```text
+$ visin publish 6ab5932a0e9a6b7570e30e2e
+$ visin withdraw 6ab5932a0e9a6b7570e30e2e
+$ visin promote 6ab5932a0e9a6b7570e30e2e --suite road-test@1 --checkpoint best.pth --sample-count day=1200
+```
+
+`publish` puts a ranked evaluation on its suite's public leaderboard and `withdraw` takes it off. `promote` copies a
+result recorded without a suite (a test a run reported) onto a suite so it can be ranked; it takes the same checkpoint and sample-count options as
+`evaluate`. Both need manage access to the project.
+
 ## visin runs
 
 ```text

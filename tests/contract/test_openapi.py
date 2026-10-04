@@ -87,6 +87,7 @@ def recorded(server, session, uploads, tmp_path, monkeypatch, hf):
         ok({"_id": "0123456789abcdef01234567", "uuid": "u", "projectId": "0123456789abcdef01234569"}, 201),
     )
     session.route("POST", "/configs/upload", ok({"_id": "0123456789abcdef01234568"}, 201))
+    session.route("POST", "/suites/check", *[ok({"digest": "d" * 64, "protocol": {}}) for _ in range(8)])
     session.route(
         "POST",
         "/visualizations/upload-url",
@@ -117,12 +118,83 @@ def recorded(server, session, uploads, tmp_path, monkeypatch, hf):
         run.log_model(checkpoint, "acme/clft", epoch=1)
         run.update(tags=["done"], name="renamed", description="d", metadata={"best": 1})
 
+    suite_file = {
+        "slug": "road-test",
+        "version": 1,
+        "name": "Road test",
+        "description": "every field",
+        "visibility": "public",
+        "project": "road-seg",
+        "protocol": {
+            "task": "semantic-segmentation",
+            "data": {"kind": "external", "label": "Road frames", "manifestSha256": "a" * 64},
+            "split": "test",
+            "annotationVersion": "2026-09",
+            "conditions": [{"name": "day", "sampleCount": 10}],
+            "classes": [{"id": "vehicle", "name": "Vehicle"}],
+            "ignoredClasses": ["void"],
+            "metrics": [
+                {
+                    "key": "mIoU",
+                    "direction": "max",
+                    "unit": "ratio",
+                    "range": {"min": 0, "max": 1},
+                    "headline": True,
+                }
+            ],
+            "aggregation": "equal-mean-of-conditions",
+            "input": {"sensors": ["camera"], "resolution": "1280x720"},
+            "evaluator": {"package": "visin-fusion", "minVersion": "1.0.0"},
+        },
+    }
+    visin.push_suite(suite_file)
+    visin.check_protocol(suite_file)
+    scored = visin.local_checkpoint(checkpoint, "contract-checkpoint")
+    for kwargs in (
+        {"dry_run": True},
+        {
+            "uuid": "contract-evaluation",
+            "run": "run-uuid",
+            "epoch": 1,
+            "epoch_uuid": "epoch-uuid",
+            "executed_at": "2026-09-30T08:00:00Z",
+            "data": {"kind": "external", "manifestSha256": "a" * 64},
+            "protocol_digest": "d" * 64,
+            "classes": {"scored": ["car"], "ignored": ["void"]},
+            "supersedes": "0123456789abcdef01234567",
+            "evaluator": {"package": "visin-fusion", "version": "1.4.2", "commit": "9d1c2ab"},
+            "provenance": {"seeds": [1]},
+        },
+        {"protocol": suite_file, "data": {"kind": "hf", "repo": "acme/frames", "commit": "c" * 40}},
+    ):
+        visin.evaluate(
+            {"day": {"overall": {"mIoU": 0.7}}},
+            suite="road-test@1",
+            checkpoint=scored,
+            project="road-seg",
+            sample_counts={"day": 10},
+            **kwargs,
+        )
+    visin.evaluate(
+        {},
+        suite=None,
+        checkpoint=visin.hub_checkpoint("acme/clft", "a" * 40, "best.safetensors"),
+        project="road-seg",
+        status="failed",
+    )
+    visin.promote(
+        "0123456789abcdef01234567", suite="road-test@1", checkpoint=scored, sample_counts={"day": 10}
+    )
+    visin.publish("0123456789abcdef01234567")
+    visin.withdraw("0123456789abcdef01234567")
+
     monkeypatch.setenv("VISIN_MODE", "offline")
     visin.init("offline run", project="road-seg").finish()
     monkeypatch.delenv("VISIN_MODE")
     visin.sync()
 
     api = visin.Api()
+    api.check_protocol(suite_file)
     list(
         api.trainings(project="road-seg", status="completed", tags=["x"], search="s", dataset="zod", limit=1)
     )
@@ -140,6 +212,25 @@ def recorded(server, session, uploads, tmp_path, monkeypatch, hf):
     list(api.comparisons(project="road-seg", type="trainings", limit=1))
     list(api.findings(project="road-seg", limit=1))
     api.visualizations(run, kind="overlay")
+    api.suites(slug="road-test", project="road-seg", include_archived=True)
+    api.suite("road-test@1")
+    api.suite("road-test")
+    api.evaluations(
+        project="road-seg", suite="road-test@1", state="eligible", status="completed", checkpoint_key="k"
+    )
+    api.evaluation("0123456789abcdef01234567")
+    api.evaluation("contract-evaluation", project="road-seg")
+    api.leaderboard("road-test@1")
+    api.public_leaderboards()
+    api.public_leaderboard("road-test@1")
+    api.leaderboard("road-test@1", page=2, limit=100, unranked_page=2)
+    api.leaderboard("road-test@1", observed=True)
+    api.public_leaderboard("road-test@1", observed=True)
+    api.leaderboard("road-test@1", all_pages=True)
+    api.public_leaderboards(page=2, limit=100)
+    list(api.iter_public_leaderboards())
+    api.public_leaderboard("road-test@1", page=2, limit=100)
+    api.public_leaderboard("road-test@1", all_pages=True)
 
     monkeypatch.setenv("VISIN_TOKEN", "vsn_live_contract")
     main(["check", "--project", "road-seg", "--write"])
@@ -183,14 +274,48 @@ def test_every_body_satisfies_its_schema_and_sends_nothing_the_server_would_stri
         "POST /trainings",
         "PUT /trainings/{id}",
         "POST /epochs/upload",
-        "POST /test-results/upload",
         "POST /benchmarks/upload",
         "POST /configs/upload",
         "POST /visualizations/upload-url",
         "POST /visualizations",
         "POST /trainings/{id}/models",
+        "POST /suites",
+        "POST /evaluations",
+        "POST /evaluations/check",
+        "POST /evaluations/promote",
+        "POST /suites/check",
     ):
         assert operation in checked, f"{operation} was never exercised"
+
+
+def test_leaderboard_paging_uses_the_query_parameters_the_api_declares(spec, recorded):
+    checked = set()
+    problems = []
+    for call in recorded:
+        path = call["url"].split("/api", 1)[1]
+        if "leaderboard" not in path or not call["params"]:
+            continue
+        template, operation = find_operation(spec, call["method"], path)
+        declared = {
+            item["name"]: resolve(item.get("schema") or {}, spec)
+            for item in operation.get("parameters", [])
+            if item.get("in") == "query"
+        }
+        checked.add(template)
+        for name, value in call["params"].items():
+            if name not in declared:
+                problems.append(f"{template}: undeclared query parameter {name}")
+            else:
+                problems.extend(
+                    f"{template}?{name}={value}: {error.message}"
+                    for error in jsonschema.Draft202012Validator(declared[name]).iter_errors(value)
+                )
+    assert not problems, "\n".join(problems)
+    assert checked == {
+        "/suites/{slug}/{version}/leaderboard",
+        "/public/leaderboards",
+        "/public/leaderboards/{slug}/{version}",
+    }
 
 
 def test_config_upload_inherits_the_training_project(recorded):

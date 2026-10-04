@@ -72,7 +72,7 @@ passed a name.
 
 **Retries depend on the request, not on its method.** `transport.py` retries on its own terms
 instead of leaving it to urllib3, because a POST is only safe to repeat if it carries its own id.
-Runs, epochs and test results do: epoch UUIDs are `uuid5(run, epoch)`, and a repeat is answered 409.
+Runs, epochs and test results do: epoch UUIDs are `uuid5(run, epoch)`, and a repeat of a run or an epoch is answered 409. A test result is an evaluation, so a repeat of one is answered with the stored one (200), and only a different result under its uuid is refused (409).
 Benchmarks and configs do not, so they are retried only when the request provably never reached
 the server: the connection failed, or the rate limiter or auth refused it before any handler ran.
 500 is never retried, as Visin documents.

@@ -28,9 +28,44 @@ def test_a_refused_run_is_an_error(client, session, context):
         deliver(client, {"op": "create_run", "body": {"uuid": "u1", "name": "x"}}, context)
 
 
-def test_a_repeated_test_result_counts_as_delivered(client, session, context):
-    session.route("POST", "/test-results/upload", refused(409, "exists"))
-    assert deliver(client, {"op": "test_result", "body": {}}, context) is None
+BODY = {
+    "epoch": 3,
+    "epoch_uuid": "e-3",
+    "test_uuid": "t-1",
+    "test_results": {"day": {}},
+    "timestamp": "2026-10-01",
+}
+
+
+def test_a_test_result_is_delivered_as_an_evaluation_naming_its_epoch_and_the_run_when_known(
+    client, session, context
+):
+    session.route("POST", "/evaluations", ok({"_id": "e1"}, 201))
+    context.training_projects["u1"] = "p1"
+    deliver(client, {"op": "test_result", "training_uuid": "u1", "body": BODY}, context)
+    assert session.bodies("/evaluations")[0] == {
+        "uuid": "t-1",
+        "results": {"day": {}},
+        "source": {"epochUuid": "e-3", "epoch": 3, "trainingUuid": "u1"},
+        "executedAt": "2026-10-01",
+        "projectId": "p1",
+    }
+
+
+def test_a_test_result_kept_by_an_earlier_version_names_only_its_epoch(client, session, context):
+    session.route("POST", "/evaluations", ok({"_id": "e1"}, 201))
+    deliver(client, {"op": "test_result", "body": {**BODY, "timestamp": None}}, context)
+    assert session.bodies("/evaluations")[0] == {
+        "uuid": "t-1",
+        "results": {"day": {}},
+        "source": {"epochUuid": "e-3", "epoch": 3},
+    }
+
+
+def test_a_different_result_under_the_same_uuid_is_refused_not_counted_as_delivered(client, session, context):
+    session.route("POST", "/evaluations", refused(409, "already exists with different content"))
+    with pytest.raises(ApiError):
+        deliver(client, {"op": "test_result", "body": BODY}, context)
 
 
 def test_an_update_names_the_run_by_its_id(client, session, context):

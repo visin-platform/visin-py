@@ -62,6 +62,7 @@ def server(monkeypatch, client):
     monkeypatch.setattr("visin.offline.HttpClient", factory)
     monkeypatch.setattr("visin.cli.HttpClient", factory)
     monkeypatch.setattr("visin.api.HttpClient", factory)
+    monkeypatch.setattr("visin._internal.connect.HttpClient", factory)
     return client
 
 

@@ -40,6 +40,9 @@ visin sync             # send it
 
 `VISIN_DIR` moves the directory, for instance onto a scratch filesystem shared between nodes.
 
+Evaluations recorded with `visin.evaluate` are kept the same way when Visin cannot be reached, and
+`visin sync` sends them with the rest. See [evaluating models](evaluation.md).
+
 ## What sync guarantees
 
 - **Order is kept.** A run's reports arrive in the order they were made.

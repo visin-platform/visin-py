@@ -16,18 +16,29 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from ..errors import ApiError, ConfigurationError
+from ..errors import ApiError, ConfigurationError, VisinError
 from .transport import HttpClient
 
 logger = logging.getLogger("visin")
 
 KINDS = frozenset(
-    {"create_run", "epoch", "test_result", "benchmark", "config", "visualization", "update", "model"}
+    {
+        "create_run",
+        "epoch",
+        "test_result",
+        "benchmark",
+        "config",
+        "visualization",
+        "update",
+        "model",
+        "evaluation",
+    }
 )
 
 
@@ -92,9 +103,11 @@ def deliver(client: HttpClient, op: dict[str, Any], context: DeliveryContext) ->
     if kind == "epoch":
         return _post_once(client, "/epochs/upload", body, context)
     if kind == "test_result":
-        return _post_once(client, "/test-results/upload", body, context)
+        return _evaluation(client, _as_evaluation(op, body, context), context)
     if kind == "benchmark":
         return _post_once(client, "/benchmarks/upload", body, context)
+    if kind == "evaluation":
+        return _evaluation(client, body, context, op.get("protocol"))
     if kind == "config":
         return _config(client, op, body, context)
     if kind == "visualization":
@@ -128,6 +141,71 @@ def _post_once(client: HttpClient, path: str, body: dict[str, Any], context: Del
                 context.repeated.add(str(body["epoch_uuid"]))
             return None
         raise
+
+
+def _evaluation(
+    client: HttpClient, body: dict[str, Any], context: DeliveryContext, protocol: dict[str, Any] | None = None
+) -> Any:
+    """Record an evaluation. A repeat of the same result is answered 200 with the stored one.
+
+    Unlike the writes above, a 409 here is not "already delivered": the server only answers it for a
+    *different* result under the same uuid, which is a refusal the caller has to hear about.
+
+    ``protocol`` is the protocol an evaluation was kept with when its digest could not be asked for yet (the
+    result waited on disk). The digest is asked for now, from the server that will judge it, and becomes
+    the evidence of the protocol that ran.
+    """
+    if protocol:
+        evidence = dict(body.get("evidence") or {})
+        evidence["protocolDigest"] = digest_of(client, protocol)
+        body = {**body, "evidence": evidence}
+    return client.request("POST", "/evaluations", json=body, idempotent=True, retries=context.retries)
+
+
+def _as_evaluation(
+    op: Mapping[str, Any], body: Mapping[str, Any], context: DeliveryContext
+) -> dict[str, Any]:
+    """A test result as the evaluation Visin keeps it: results with no suite, from an epoch of a run.
+
+    ``log_test_results`` writes the result in its own words (``test_uuid``, ``test_results``,
+    ``timestamp``), and a result kept on disk by an earlier version carries only those. The run it came
+    from is named when known and is otherwise the run of the epoch; the project is the run's, when
+    known, and otherwise the epoch's.
+    """
+    source: dict[str, Any] = {"epochUuid": body["epoch_uuid"], "epoch": body["epoch"]}
+    training = op.get("training_uuid")
+    if training:
+        source["trainingUuid"] = training
+    evaluation: dict[str, Any] = {
+        "uuid": body["test_uuid"],
+        "results": body["test_results"],
+        "source": source,
+    }
+    if body.get("timestamp"):
+        evaluation["executedAt"] = body["timestamp"]
+    project = context.training_projects.get(training) if training else None
+    if project:
+        evaluation["projectId"] = project
+    return evaluation
+
+
+def digest_of(client: Any, protocol: Mapping[str, Any]) -> str:
+    """Ask Visin for the digest of ``protocol`` on an open client."""
+    data = client.request("POST", "/suites/check", json={"protocol": dict(protocol)}) or {}
+    digest = data.get("digest")
+    if not isinstance(digest, str) or not digest:
+        raise ConfigurationError("Visin did not return a digest for that protocol; is the server up to date?")
+    return digest
+
+
+def discover_project(client: HttpClient) -> str | None:
+    """The one project a pipeline key is limited to, as the server says, or ``None`` when it cannot say."""
+    try:
+        found = client.request("GET", "/.well-known/visin") or {}
+    except VisinError:  # discovery is a courtesy; the caller asks for a project itself
+        return None
+    project = (found.get("credential") or {}).get("project") or {}
+    return str(project["id"]) if project.get("id") else None
 
 
 def _create_run(client: HttpClient, body: dict[str, Any], context: DeliveryContext) -> Any:

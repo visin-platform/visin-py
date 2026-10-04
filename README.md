@@ -54,6 +54,24 @@ run.upload_visualization(12, "renders/overlay_0001.png", kind="overlay")
 run.log_config(args)  # argparse, dataclass, pydantic, Hydra…
 ```
 
+## Rank checkpoints
+
+```python
+checkpoint = visin.local_checkpoint("checkpoints/epoch_40.pth")
+evaluation = visin.evaluate(
+    results,
+    suite="road-test@1",
+    checkpoint=checkpoint,
+    sample_counts={"day": 1200, "night": 800},
+    project="road-seg",
+)
+print(evaluation.verdict)  # eligible, or incomplete: missing-condition(night)
+```
+
+Visin judges each result against a written-down suite and says whether it can be ranked, and why not.
+`visin leaderboard road-test@1` shows the ranking and where each model is weakest. See
+[evaluating models](docs/guides/evaluation.md).
+
 ## Frameworks
 
 ```python

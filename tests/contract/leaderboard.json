@@ -1,0 +1,1156 @@
+{
+  "$comment": "One suite per direction. Expected values are worked by hand, not produced by the code under test. Mirrored in visin-py's contract fixtures. `suiteEvidence` is what each suite's evaluator observed when it ran faithfully, with `$digest` standing for the suite's own protocol digest (computed by the server, so never typed here). An evaluation without `evidence` carries its suite's; an object overrides those keys; `null` carries none, and the result is still ranked, as `reported` rather than `observed`. `attested: true` is a result promoted by a manager: nothing was observed, and none is invented.",
+  "suites": {
+    "road": {
+      "task": "semantic-segmentation",
+      "data": {
+        "kind": "external",
+        "label": "Road test frames",
+        "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "split": "test",
+      "conditions": [
+        {
+          "name": "day",
+          "sampleCount": 120
+        },
+        {
+          "name": "night",
+          "sampleCount": 100
+        },
+        {
+          "name": "rain",
+          "sampleCount": 80
+        }
+      ],
+      "classes": [
+        {
+          "id": "vehicle"
+        },
+        {
+          "id": "pedestrian"
+        }
+      ],
+      "ignoredClasses": [
+        "void"
+      ],
+      "metrics": [
+        {
+          "key": "mIoU_foreground",
+          "direction": "max",
+          "unit": "ratio",
+          "range": {
+            "min": 0,
+            "max": 1
+          },
+          "headline": true
+        },
+        {
+          "key": "mean_ap",
+          "direction": "max",
+          "unit": "ratio",
+          "range": {
+            "min": 0,
+            "max": 1
+          }
+        }
+      ],
+      "aggregation": "equal-mean-of-conditions",
+      "input": {
+        "sensors": [
+          "camera"
+        ],
+        "resolution": "1280x720"
+      },
+      "evaluator": {
+        "package": "visin-fusion",
+        "minVersion": "1.0.0"
+      }
+    },
+    "errors": {
+      "task": "semantic-segmentation",
+      "data": {
+        "kind": "external",
+        "label": "Depth test frames",
+        "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "split": "test",
+      "conditions": [
+        {
+          "name": "day",
+          "sampleCount": 300
+        },
+        {
+          "name": "night",
+          "sampleCount": 100
+        }
+      ],
+      "classes": [
+        {
+          "id": "vehicle"
+        },
+        {
+          "id": "pedestrian"
+        }
+      ],
+      "ignoredClasses": [
+        "void"
+      ],
+      "metrics": [
+        {
+          "key": "mean_error",
+          "direction": "min",
+          "unit": "ratio",
+          "range": {
+            "min": 0,
+            "max": 1
+          },
+          "headline": true
+        }
+      ],
+      "aggregation": "sample-weighted-mean",
+      "input": {
+        "sensors": [
+          "camera"
+        ],
+        "resolution": "1280x720"
+      },
+      "evaluator": {
+        "package": "visin-fusion",
+        "minVersion": "1.0.0"
+      }
+    }
+  },
+  "suiteEvidence": {
+    "road": {
+      "data": {
+        "kind": "external",
+        "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "protocolDigest": "$digest",
+      "evaluator": {
+        "package": "visin-fusion",
+        "version": "1.4.2"
+      },
+      "classes": {
+        "scored": [
+          "vehicle",
+          "pedestrian"
+        ],
+        "ignored": [
+          "void"
+        ]
+      }
+    },
+    "errors": {
+      "data": {
+        "kind": "external",
+        "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "protocolDigest": "$digest",
+      "evaluator": {
+        "package": "visin-fusion",
+        "version": "1.4.2"
+      },
+      "classes": {
+        "scored": [
+          "vehicle",
+          "pedestrian"
+        ],
+        "ignored": [
+          "void"
+        ]
+      }
+    }
+  },
+  "evaluations": [
+    {
+      "id": "a-old",
+      "suite": "road",
+      "checkpoint": "A",
+      "status": "completed",
+      "receivedAt": "2026-10-01T09:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.85,
+            "mean_ap": 0.8
+          },
+          "vehicle": {
+            "iou": 0.85
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.75,
+            "mean_ap": 0.7
+          },
+          "vehicle": {
+            "iou": 0.75
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      }
+    },
+    {
+      "id": "a-new",
+      "suite": "road",
+      "checkpoint": "A",
+      "status": "completed",
+      "receivedAt": "2026-10-02T09:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.7,
+            "mean_ap": 0.65
+          },
+          "vehicle": {
+            "iou": 0.7
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.6,
+            "mean_ap": 0.55
+          },
+          "vehicle": {
+            "iou": 0.6
+          }
+        },
+        "overall": {
+          "mIoU_foreground": 0.75
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      }
+    },
+    {
+      "id": "a-twin",
+      "suite": "road",
+      "checkpoint": "A-twin",
+      "status": "completed",
+      "receivedAt": "2026-10-02T10:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.7,
+            "mean_ap": 0.65
+          },
+          "vehicle": {
+            "iou": 0.7
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.6,
+            "mean_ap": 0.55
+          },
+          "vehicle": {
+            "iou": 0.6
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      }
+    },
+    {
+      "id": "b-ok",
+      "suite": "road",
+      "checkpoint": "B",
+      "status": "completed",
+      "receivedAt": "2026-10-01T10:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.78,
+            "mean_ap": 0.73
+          },
+          "vehicle": {
+            "iou": 0.78
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.74,
+            "mean_ap": 0.69
+          },
+          "vehicle": {
+            "iou": 0.74
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.7,
+            "mean_ap": 0.65
+          },
+          "vehicle": {
+            "iou": 0.7
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      }
+    },
+    {
+      "id": "b-failed",
+      "suite": "road",
+      "checkpoint": "B",
+      "status": "failed",
+      "receivedAt": "2026-10-03T10:00:00Z",
+      "results": {}
+    },
+    {
+      "id": "b-partial",
+      "suite": "road",
+      "checkpoint": "B",
+      "status": "completed",
+      "receivedAt": "2026-10-04T10:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.99,
+            "mean_ap": 0.94
+          },
+          "vehicle": {
+            "iou": 0.99
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.99,
+            "mean_ap": 0.94
+          },
+          "vehicle": {
+            "iou": 0.99
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100
+      }
+    },
+    {
+      "id": "c-zero",
+      "suite": "road",
+      "checkpoint": "C",
+      "status": "completed",
+      "receivedAt": "2026-10-01T11:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.9,
+            "mean_ap": 0.85
+          },
+          "vehicle": {
+            "iou": 0.9
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.0,
+            "mean_ap": 0
+          },
+          "vehicle": {
+            "iou": 0.0
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.6,
+            "mean_ap": 0.55
+          },
+          "vehicle": {
+            "iou": 0.6
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      }
+    },
+    {
+      "id": "d-skipped",
+      "suite": "road",
+      "checkpoint": "D",
+      "status": "completed",
+      "receivedAt": "2026-10-01T12:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.95,
+            "mean_ap": 0.9
+          },
+          "vehicle": {
+            "iou": 0.95
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.95,
+            "mean_ap": 0.9
+          },
+          "vehicle": {
+            "iou": 0.95
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100
+      }
+    },
+    {
+      "id": "e-protocol",
+      "suite": "road",
+      "checkpoint": "E",
+      "status": "completed",
+      "receivedAt": "2026-10-01T13:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      },
+      "evidence": {
+        "protocolDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    },
+    {
+      "id": "f-range",
+      "suite": "road",
+      "checkpoint": "F",
+      "status": "completed",
+      "receivedAt": "2026-10-01T14:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 1.2,
+            "mean_ap": 1.15
+          },
+          "vehicle": {
+            "iou": 1.2
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      }
+    },
+    {
+      "id": "g-counts",
+      "suite": "road",
+      "checkpoint": "G",
+      "status": "completed",
+      "receivedAt": "2026-10-01T15:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 90,
+        "rain": 80
+      }
+    },
+    {
+      "id": "h-unpinned",
+      "suite": "road",
+      "status": "completed",
+      "receivedAt": "2026-10-01T16:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      }
+    },
+    {
+      "id": "i-metric",
+      "suite": "road",
+      "checkpoint": "I",
+      "status": "completed",
+      "receivedAt": "2026-10-01T17:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.8
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      }
+    },
+    {
+      "id": "j-data",
+      "suite": "road",
+      "checkpoint": "J",
+      "status": "completed",
+      "receivedAt": "2026-10-01T18:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.7,
+            "mean_ap": 0.65
+          },
+          "vehicle": {
+            "iou": 0.7
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.6,
+            "mean_ap": 0.55
+          },
+          "vehicle": {
+            "iou": 0.6
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      },
+      "evidence": {
+        "data": {
+          "kind": "external",
+          "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    },
+    {
+      "id": "k-evaluator",
+      "suite": "road",
+      "checkpoint": "K",
+      "status": "completed",
+      "receivedAt": "2026-10-01T19:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mIoU_foreground": 0.8,
+            "mean_ap": 0.75
+          },
+          "vehicle": {
+            "iou": 0.8
+          }
+        },
+        "night": {
+          "overall": {
+            "mIoU_foreground": 0.7,
+            "mean_ap": 0.65
+          },
+          "vehicle": {
+            "iou": 0.7
+          }
+        },
+        "rain": {
+          "overall": {
+            "mIoU_foreground": 0.6,
+            "mean_ap": 0.55
+          },
+          "vehicle": {
+            "iou": 0.6
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 120,
+        "night": 100,
+        "rain": 80
+      },
+      "evidence": {
+        "evaluator": {
+          "package": "visin-fusion",
+          "version": "0.9.0"
+        }
+      }
+    },
+    {
+      "id": "x",
+      "suite": "errors",
+      "checkpoint": "X",
+      "status": "completed",
+      "receivedAt": "2026-10-01T09:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mean_error": 0.1
+          }
+        },
+        "night": {
+          "overall": {
+            "mean_error": 0.3
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 300,
+        "night": 100
+      }
+    },
+    {
+      "id": "y",
+      "suite": "errors",
+      "checkpoint": "Y",
+      "status": "completed",
+      "receivedAt": "2026-10-01T10:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mean_error": 0.1
+          }
+        },
+        "night": {
+          "overall": {
+            "mean_error": 0.14
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 300,
+        "night": 100
+      }
+    },
+    {
+      "id": "z",
+      "suite": "errors",
+      "checkpoint": "Z",
+      "status": "completed",
+      "receivedAt": "2026-10-01T11:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mean_error": 0.16
+          }
+        },
+        "night": {
+          "overall": {
+            "mean_error": 0.08
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 300,
+        "night": 100
+      }
+    },
+    {
+      "id": "m-attested",
+      "suite": "errors",
+      "checkpoint": "W",
+      "status": "completed",
+      "receivedAt": "2026-10-01T12:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mean_error": 0.04
+          }
+        },
+        "night": {
+          "overall": {
+            "mean_error": 0.08
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 300,
+        "night": 100
+      },
+      "attested": true
+    },
+    {
+      "id": "l-bare",
+      "suite": "errors",
+      "checkpoint": "L",
+      "status": "completed",
+      "receivedAt": "2026-10-01T13:00:00Z",
+      "results": {
+        "day": {
+          "overall": {
+            "mean_error": 0.2
+          }
+        },
+        "night": {
+          "overall": {
+            "mean_error": 0.2
+          }
+        }
+      },
+      "sampleCounts": {
+        "day": 300,
+        "night": 100
+      },
+      "evidence": null
+    }
+  ],
+  "expected": {
+    "states": {
+      "a-old": {
+        "state": "eligible",
+        "evidence": "observed"
+      },
+      "a-new": {
+        "state": "eligible",
+        "warnings": [
+          {
+            "code": "submitted-overall-differs",
+            "detail": "mIoU_foreground"
+          }
+        ]
+      },
+      "a-twin": {
+        "state": "eligible"
+      },
+      "b-ok": {
+        "state": "eligible"
+      },
+      "b-failed": {
+        "state": "incomplete",
+        "reasons": [
+          {
+            "code": "evaluation-failed"
+          }
+        ]
+      },
+      "b-partial": {
+        "state": "incomplete",
+        "reasons": [
+          {
+            "code": "missing-condition",
+            "detail": "rain"
+          }
+        ]
+      },
+      "c-zero": {
+        "state": "eligible"
+      },
+      "d-skipped": {
+        "state": "incomplete",
+        "reasons": [
+          {
+            "code": "missing-condition",
+            "detail": "rain"
+          }
+        ]
+      },
+      "e-protocol": {
+        "state": "incompatible",
+        "reasons": [
+          {
+            "code": "protocol-mismatch"
+          }
+        ]
+      },
+      "f-range": {
+        "state": "incompatible",
+        "reasons": [
+          {
+            "code": "metric-out-of-range",
+            "detail": "night/mIoU_foreground"
+          },
+          {
+            "code": "metric-out-of-range",
+            "detail": "night/mean_ap"
+          }
+        ]
+      },
+      "g-counts": {
+        "state": "incompatible",
+        "reasons": [
+          {
+            "code": "sample-count-mismatch",
+            "detail": "night"
+          }
+        ]
+      },
+      "h-unpinned": {
+        "state": "incomplete",
+        "reasons": [
+          {
+            "code": "no-checkpoint"
+          }
+        ]
+      },
+      "i-metric": {
+        "state": "incomplete",
+        "reasons": [
+          {
+            "code": "missing-metric",
+            "detail": "night/mean_ap"
+          }
+        ]
+      },
+      "x": {
+        "state": "eligible"
+      },
+      "y": {
+        "state": "eligible"
+      },
+      "z": {
+        "state": "eligible"
+      },
+      "j-data": {
+        "state": "incompatible",
+        "reasons": [
+          {
+            "code": "data-mismatch",
+            "detail": "manifestSha256"
+          }
+        ],
+        "evidence": "observed"
+      },
+      "k-evaluator": {
+        "state": "incompatible",
+        "reasons": [
+          {
+            "code": "evaluator-unsupported",
+            "detail": "visin-fusion 0.9.0 < 1.0.0"
+          }
+        ]
+      },
+      "l-bare": {
+        "state": "eligible",
+        "evidence": "reported",
+        "warnings": [
+          {
+            "code": "no-data-evidence"
+          },
+          {
+            "code": "no-protocol-evidence"
+          },
+          {
+            "code": "no-evaluator-evidence"
+          }
+        ]
+      },
+      "m-attested": {
+        "state": "eligible",
+        "evidence": "attested"
+      }
+    },
+    "leaderboards": {
+      "road": {
+        "entries": [
+          {
+            "id": "b-ok",
+            "rank": 1,
+            "attempts": 3,
+            "headline": 0.74,
+            "worst": {
+              "condition": "rain",
+              "value": 0.7
+            },
+            "gap": 0.04
+          },
+          {
+            "id": "a-new",
+            "rank": 2,
+            "attempts": 2,
+            "headline": 0.7,
+            "worst": {
+              "condition": "rain",
+              "value": 0.6
+            },
+            "gap": 0.1
+          },
+          {
+            "id": "a-twin",
+            "rank": 2,
+            "attempts": 1,
+            "headline": 0.7,
+            "worst": {
+              "condition": "rain",
+              "value": 0.6
+            },
+            "gap": 0.1
+          },
+          {
+            "id": "c-zero",
+            "rank": 4,
+            "attempts": 1,
+            "headline": 0.5,
+            "worst": {
+              "condition": "night",
+              "value": 0
+            },
+            "gap": 0.5
+          }
+        ],
+        "unranked": [
+          {
+            "checkpoint": "D",
+            "id": "d-skipped",
+            "state": "incomplete"
+          },
+          {
+            "checkpoint": "E",
+            "id": "e-protocol",
+            "state": "incompatible"
+          },
+          {
+            "checkpoint": "F",
+            "id": "f-range",
+            "state": "incompatible"
+          },
+          {
+            "checkpoint": "G",
+            "id": "g-counts",
+            "state": "incompatible"
+          },
+          {
+            "checkpoint": "I",
+            "id": "i-metric",
+            "state": "incomplete"
+          },
+          {
+            "checkpoint": "J",
+            "id": "j-data",
+            "state": "incompatible"
+          },
+          {
+            "checkpoint": "K",
+            "id": "k-evaluator",
+            "state": "incompatible"
+          }
+        ]
+      },
+      "errors": {
+        "entries": [
+          {
+            "id": "m-attested",
+            "rank": 1,
+            "attempts": 1,
+            "headline": 0.05,
+            "worst": {
+              "condition": "night",
+              "value": 0.08
+            },
+            "gap": 0.03
+          },
+          {
+            "id": "y",
+            "rank": 2,
+            "attempts": 1,
+            "headline": 0.11,
+            "worst": {
+              "condition": "night",
+              "value": 0.14
+            },
+            "gap": 0.03
+          },
+          {
+            "id": "z",
+            "rank": 3,
+            "attempts": 1,
+            "headline": 0.14,
+            "worst": {
+              "condition": "day",
+              "value": 0.16
+            },
+            "gap": 0.02
+          },
+          {
+            "id": "x",
+            "rank": 4,
+            "attempts": 1,
+            "headline": 0.15,
+            "worst": {
+              "condition": "night",
+              "value": 0.3
+            },
+            "gap": 0.15
+          },
+          {
+            "id": "l-bare",
+            "rank": 5,
+            "attempts": 1,
+            "headline": 0.2,
+            "worst": {
+              "condition": "day",
+              "value": 0.2
+            },
+            "gap": 0.0
+          }
+        ],
+        "unranked": []
+      }
+    }
+  }
+}

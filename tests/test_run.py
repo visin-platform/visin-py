@@ -183,14 +183,15 @@ def test_a_server_error_is_counted_but_never_raised(client, session):
 # ---------------------------------------------------------------- test results, benchmarks, configs
 
 
-def test_test_results_carry_their_own_uuid_so_a_retry_is_harmless(client, session):
+def test_test_results_are_recorded_as_evaluations_with_their_own_uuid_so_a_retry_is_harmless(client, session):
     run = make_run(client)
     test_uuid = run.log_test_results(4, {"day": {"overall": {"iou": 0.7}}})
     run.flush()
-    body = sent(session, "/test-results/upload")[0]
-    assert body["test_uuid"] == test_uuid
-    assert body["epoch_uuid"] == epoch_uuid_for("run-1", 4)
-    assert body["epoch"] == 4
+    body = sent(session, "/evaluations")[0]
+    assert body["uuid"] == test_uuid
+    assert body["results"] == {"day": {"overall": {"iou": 0.7}}}
+    assert body["source"] == {"epochUuid": epoch_uuid_for("run-1", 4), "epoch": 4, "trainingUuid": "run-1"}
+    assert "suite" not in body and "executedAt" in body
 
 
 def test_test_results_are_sent_after_their_epoch(client, session):
@@ -199,7 +200,7 @@ def test_test_results_are_sent_after_their_epoch(client, session):
     run.log_test_results(4, {"day_clear": {"iou": 0.7}})
     run.flush()
     paths = session.paths("POST")
-    assert paths.index("/epochs/upload") < paths.index("/test-results/upload")
+    assert paths.index("/epochs/upload") < paths.index("/evaluations")
 
 
 def test_benchmark_fills_in_the_system_info_visin_requires(client, session, monkeypatch):
@@ -900,7 +901,7 @@ def test_results_can_name_an_epoch_this_package_did_not_log(client, session, tmp
     )
     run.upload_visualization(9, frame, "overlay", epoch_uuid=legacy)
     run.flush()
-    assert sent(session, "/test-results/upload")[0]["epoch_uuid"] == legacy
+    assert sent(session, "/evaluations")[0]["source"]["epochUuid"] == legacy
     assert [b["epoch_uuid"] for b in sent(session, "/benchmarks/upload")] == [legacy, legacy]
     assert all("training_uuid" not in b for b in sent(session, "/benchmarks/upload"))
     assert sent(session, "/visualizations/upload-url")[0]["epoch_uuid"] == legacy
