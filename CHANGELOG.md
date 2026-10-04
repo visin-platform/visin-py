@@ -10,6 +10,18 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-04
+
+### Added
+
+- add evaluation leaderboards with unified verification and simplify public config
+
+### Fixed
+
+- linter and docs format issues
+
+[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/visin-platform/visin-py/compare/v0.7.0...v0.8.0
 ## [0.7.0] - 2026-10-03
 
 ### Added
@@ -20,7 +32,6 @@ one, together with anything written by hand under Unreleased.
 
 - add windows compatible paths in training
 
-[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/visin-platform/visin-py/compare/v0.6.0...v0.7.0
 ## [0.6.0] - 2026-10-02
 
