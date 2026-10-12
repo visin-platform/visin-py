@@ -131,6 +131,8 @@ class Delivery:
         try:
             deliver(self.client, op, self.context)
         except VisinError as exc:
+            if op.get("_retained_upload"):
+                return
             if self.spool is not None and worth_retrying_later(exc):
                 if not self.spooling:
                     logger.warning(
@@ -143,7 +145,10 @@ class Delivery:
                 return
             discard_staged(op, self.context)
             raise
-        discard_staged(op, self.context)
+        assert self.sender is not None
+        with self.sender._lock:
+            if not op.get("_retained_upload"):
+                discard_staged(op, self.context)
         self.sent += 1
         if op.get("op") == "epoch":
             self._note_epoch(str(op["body"].get("epoch_uuid")), op["body"].get("epoch"))
@@ -200,7 +205,7 @@ class Delivery:
         """
         if self.sender is None:
             return True
-        flushed = self.sender.stop(timeout)
+        flushed = self.sender.stop(timeout, retain=self._retain_model_upload)
         self._keep_leftovers()
         if flushed and self.spooling:
             try:
@@ -208,6 +213,24 @@ class Delivery:
             except Exception as exc:
                 logger.warning("visin: could not send kept reports: %s", exc)
         return flushed
+
+    def _retain_model_upload(self, work: Any) -> None:
+        """Keep an in-flight model upload before shutdown can lose its daemon thread.
+
+        Called under the sender's lock, also held when a successful upload discards its staged copy.
+        The copy remains until sync replays this same reservation/claim, even if the worker finishes later.
+        """
+        if self.spool is None or not isinstance(work, functools.partial) or not work.args:
+            return
+        op = work.args[0]
+        if op.get("op") != "model_file" or op.get("_retained_upload"):
+            return
+        try:
+            self.spool.append(op)
+        except OSError as exc:
+            logger.warning("visin: could not keep the active model upload: %s", exc)
+            return
+        op["_retained_upload"] = True
 
     def _keep_leftovers(self) -> None:
         assert self.sender is not None

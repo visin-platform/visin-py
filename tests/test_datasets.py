@@ -431,6 +431,7 @@ def test_download_pins_the_archive_signed_after_metadata_was_read(
     assert (root / "train.txt").read_text() == "replacement content of another size"
     marker = json.loads((root.parent / ".visin-dataset.json").read_text())
     assert marker["revision"] == "2026-02-01T00:00:00.000Z"
+    assert marker["archiveRevision"] == marker["revision"]
     assert marker["size"] == len(replacement)
 
 

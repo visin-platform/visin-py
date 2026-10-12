@@ -40,7 +40,7 @@ from ._internal.providers import HUB
 from ._internal.reports import deliver, digest_of, discover_project
 from ._internal.serialize import to_jsonable
 from ._internal.spool import Spool
-from ._internal.transport import worth_retrying_later
+from ._internal.transport import file_sha256, worth_retrying_later
 from .errors import ConfigurationError, VisinError
 from .models import Evaluation, TestResult, Training
 from .suites import protocol_of
@@ -57,16 +57,10 @@ __all__ = [
     "withdraw",
 ]
 
-_BLOCK = 8 * 2**20
-
 
 def sha256_of(path: str | Path) -> str:
     """The SHA-256 of a file, read in blocks so a large checkpoint never has to fit in memory."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(_BLOCK), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    return file_sha256(str(path))
 
 
 def local_checkpoint(path: str | Path, label: str | None = None) -> dict[str, Any]:

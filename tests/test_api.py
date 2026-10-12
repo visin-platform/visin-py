@@ -1,9 +1,11 @@
+import hashlib
+
 import pytest
-from fakes import ok
+from fakes import FakeStream, ok
 
 import visin
 from visin import Api, Training, flatten
-from visin.errors import ConfigurationError
+from visin.errors import ConfigurationError, TransportError, VisinError
 
 
 @pytest.fixture
@@ -762,3 +764,98 @@ class TestSuitesAndEvaluations:
             {"rank": 1, "evaluationId": "e", "headline": 1, "worst": {}, "gap": 0}
         )
         assert entry.name == "unknown"
+
+
+# ---------------------------------------------------------------- stored models
+
+WEIGHTS = b"PK\x03\x04 weights"
+
+
+def stored_run(*models):
+    return ok({"_id": "t1", "uuid": "run-1", "models": [*models]})
+
+
+def stored(model_id="m1", fmt="pth", **fields):
+    return {
+        "_id": model_id,
+        "provider": "visin",
+        "format": fmt,
+        "filename": f"run-epoch99.{fmt}",
+        "size": len(WEIGHTS),
+        "sha256": hashlib.sha256(WEIGHTS).hexdigest(),
+        "epoch": 99,
+        "status": "ready",
+        "license": {"id": "cc-by-4.0"},
+        **fields,
+    }
+
+
+def test_models_lists_what_a_run_kept_on_visin(api, session):
+    session.route(
+        "GET",
+        "/trainings/uuid/run-1",
+        stored_run(
+            {"provider": "hf", "repo": "acme/clft", "revision": "a" * 40}, stored("m1"), stored("m2", "onnx")
+        ),
+    )
+    assert [(m.id, m.format) for m in api.models("run-1")] == [("m1", "pth"), ("m2", "onnx")]
+
+
+def test_a_model_is_downloaded_as_the_client_checked_and_named_for_its_file(api, session, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1")))
+    session.route("GET", "/trainings/t1/models/m1/file", FakeStream(200, WEIGHTS))
+    path = api.download_model("run-1", directory=tmp_path / "models")
+    assert path == tmp_path / "models" / "run-epoch99.pth"
+    assert path.read_bytes() == WEIGHTS
+    assert session.calls[-1]["headers"]["Accept"] == "*/*"
+
+
+def test_a_corrupted_download_is_deleted_not_kept(api, session, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1")))
+    session.route("GET", "/trainings/t1/models/m1/file", FakeStream(200, b"corrupted!!!"[: len(WEIGHTS)]))
+    with pytest.raises(TransportError, match="SHA-256"):
+        api.download_model("run-1", directory=tmp_path)
+    assert list(tmp_path.glob("*")) == []
+
+
+def test_which_model_to_download_is_asked_for_when_a_run_has_several(api, session, tmp_path):
+    run = stored_run(stored("m1"), stored("m2", "onnx"))
+    session.route("GET", "/trainings/uuid/run-1", run, run, run, run)
+    with pytest.raises(VisinError, match=r"several models.*m1 \(pth.*m2 \(onnx"):
+        api.download_model("run-1", directory=tmp_path)
+    with pytest.raises(VisinError, match="no stored model 'nope'"):
+        api.download_model("run-1", "nope", tmp_path)
+    with pytest.raises(VisinError, match="no model kept on Visin in gguf"):
+        api.download_model("run-1", file_format="gguf", directory=tmp_path)
+    session.route("GET", "/trainings/t1/models/m2/file", FakeStream(200, WEIGHTS))
+    assert api.download_model("run-1", file_format="onnx", directory=tmp_path).name == "run-epoch99.onnx"
+
+
+def test_a_model_that_is_not_offered_is_not_asked_for(api, session, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1", license=None)))
+    with pytest.raises(VisinError, match="no licence is stated"):
+        api.download_model("run-1", directory=tmp_path)
+    assert all("/file" not in call["url"] for call in session.calls)
+
+
+def test_a_run_with_no_kept_model_says_so(api, session, tmp_path):
+    session.route(
+        "GET", "/trainings/uuid/run-1", stored_run({"provider": "hf", "repo": "a/b", "revision": "a" * 40})
+    )
+    with pytest.raises(VisinError, match=r"no model kept on Visin"):
+        api.download_model("run-1", directory=tmp_path)
+
+
+def test_a_given_model_object_is_used_as_it_is(api, session, tmp_path):
+    from visin.models import StoredModel
+
+    model = StoredModel.from_json(stored("m9"), training_id="t1")
+    session.route("GET", "/trainings/t1/models/m9/file", FakeStream(200, WEIGHTS))
+    assert api.download_model("run-1", model, tmp_path).read_bytes() == WEIGHTS
+
+
+def test_the_outputs_of_a_model_come_as_one_zip(api, session, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1")))
+    session.route("GET", "/trainings/t1/models/m1/bundle", FakeStream(200, b"PK zip bytes"))
+    path = api.download_model("run-1", directory=tmp_path, outputs=True)
+    assert path.name == "run-epoch99-outputs.zip" and path.read_bytes() == b"PK zip bytes"

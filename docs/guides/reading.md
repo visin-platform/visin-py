@@ -98,3 +98,20 @@ There is one row per epoch, indexed by epoch number, with results flattened into
 `val.loss` and `val.car.iou`. A metric an epoch did not report is `NaN`, just as it is a gap in
 Visin's charts. `visin.flatten` does the flattening, if you want it on its own.
 
+## Models a run kept
+
+```python
+run = api.training("7c8564a3-bde1-4771-8376-6708002a50ac")
+for model in run.stored_models:  # or api.models(run)
+    print(model.format, model.size, model.status, model.license.get("id"))
+
+path = api.download_model(run, file_format="onnx", directory="models/")
+zip_path = api.download_model(run, file_format="pth", directory="models/", outputs=True)
+```
+
+`stored_models` are the checkpoints saved with `Run.save_model`; a model the run only links on the Hub is in
+`run.models`. `download_model` checks the file against its recorded SHA-256, resumes an interrupted
+download, and refuses a model that is not offered (`model.refusal` says why). `trainings(dataset=...)` finds
+the runs trained on a dataset, so `for run in api.trainings(dataset=dataset_id): run.stored_models` lists
+what came out of it.
+

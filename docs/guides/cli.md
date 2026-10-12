@@ -196,6 +196,29 @@ $ visin runs --project road-seg --status completed --limit 5
 Lists recent runs: their UUID, status, last update and name. `--json` prints them as JSON instead,
 each with a `url` to its page in the web app when the app's address is known (see `VISIN_APP_URL`).
 
+## visin models
+
+```text
+$ visin models 7c8564a3-bde1-4771-8376-6708002a50ac
+```
+
+Lists the checkpoints a run kept on Visin (`Run.save_model`), one line per format: id, format, size, state,
+epoch, licence and file name. A model that cannot be downloaded says why on the line below (still being
+verified, failed verification, or no licence stated). `--json` prints them as JSON.
+
+## visin download-model
+
+```text
+$ visin download-model 7c8564a3-bde1-4771-8376-6708002a50ac --format onnx --dir models/
+models/run-epoch99.onnx
+```
+
+Downloads a checkpoint and prints where it went. The file is checked against the SHA-256 Visin recorded, an
+interrupted download resumes where it stopped, and a file that does not match is deleted. A run with one model
+needs no more than its UUID; with several, say which with `--model ID` (from `visin models`) or `--format`.
+`--outputs` downloads instead the zip of what the model produced on the frames its run was evaluated on:
+predictions, confidence, the checkpoint's results and a manifest naming the model, dataset and licence.
+
 ## visin datasets
 
 ```text

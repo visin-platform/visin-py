@@ -56,9 +56,20 @@ class FakeSession:
     def route(self, method, contains, *responses):
         self.routes.setdefault((method.upper(), contains), []).extend(responses)
 
-    def request(self, method, url, data=None, headers=None, params=None, timeout=None, verify=None):
+    def request(
+        self, method, url, data=None, headers=None, params=None, timeout=None, verify=None, stream=False
+    ):
         body = json.loads(data) if data is not None else None
-        self.calls.append({"method": method.upper(), "url": url, "json": body, "params": params})
+        self.calls.append(
+            {
+                "method": method.upper(),
+                "url": url,
+                "json": body,
+                "params": params,
+                "headers": headers,
+                "stream": stream,
+            }
+        )
         # Most specific fragment first, so "/trainings/uuid/" wins over "/trainings".
         for (verb, contains), queued in sorted(self.routes.items(), key=lambda item: -len(item[0][1])):
             if verb == method.upper() and contains in url and queued:

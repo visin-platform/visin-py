@@ -15,13 +15,14 @@ Two kinds of drift are caught:
   name while reporting success.
 """
 
+import hashlib
 import json
 import os
 import re
 from pathlib import Path
 
 import pytest
-from fakes import ok
+from fakes import FakeStream, ok
 
 import visin
 from visin.cli import main
@@ -93,10 +94,20 @@ def recorded(server, session, uploads, tmp_path, monkeypatch, hf):
         "/visualizations/upload-url",
         ok({"uploadUrl": "https://files.example.test/put", "visualization_uuid": "v1", "fileId": "f1"}),
     )
+    session.route(
+        "POST",
+        "/models/upload-url",
+        *[
+            ok({"uploadUrl": "https://files.example.test/model", "fileId": f"models/t/{n}", "maxBytes": 1})
+            for n in ("a.pth", "a.onnx")
+        ],
+    )
     frame = tmp_path / "overlay.png"
     frame.write_bytes(b"\x89PNG")
     checkpoint = tmp_path / "best.pt"
     checkpoint.write_bytes(b"weights")
+    export = tmp_path / "best.onnx"
+    export.write_bytes(b"\x08\x09 onnx")
 
     monkeypatch.setenv("VISIN_PROVENANCE", "1")
     with visin.init(
@@ -116,6 +127,20 @@ def recorded(server, session, uploads, tmp_path, monkeypatch, hf):
         run.log_benchmark({"device": "cpu", "fps": 1.0}, epoch=1)
         run.upload_visualization(1, frame, "overlay", metadata={"sample": 1})
         run.log_model(checkpoint, "acme/clft", epoch=1)
+        weights_digest = run.save_model(
+            checkpoint,
+            epoch=1,
+            licence="cc-by-4.0",
+            credit="TalTech",
+            model_info={"backbone": "clft", "transforms": {"resize": 384}},
+        )
+        run.save_model(
+            export,
+            epoch=1,
+            licence={"id": "other", "name": "Acme terms", "url": "https://acme.test/terms"},
+            source_sha256=weights_digest,
+            parity={"maxAbsDiff": 1e-6, "argmaxMismatchFraction": 0.0, "frames": 48},
+        )
         run.update(tags=["done"], name="renamed", description="d", metadata={"best": 1})
 
     suite_file = {
@@ -212,6 +237,30 @@ def recorded(server, session, uploads, tmp_path, monkeypatch, hf):
     list(api.comparisons(project="road-seg", type="trainings", limit=1))
     list(api.findings(project="road-seg", limit=1))
     api.visualizations(run, kind="overlay")
+    weights = b"weights"
+    kept = {
+        "_id": "0123456789abcdef01234567",
+        "uuid": "kept-run",
+        "name": "n",
+        "models": [
+            {
+                "_id": "0123456789abcdef01234560",
+                "provider": "visin",
+                "format": "pth",
+                "filename": "best.pth",
+                "size": len(weights),
+                "sha256": hashlib.sha256(weights).hexdigest(),
+                "status": "ready",
+                "license": {"id": "cc-by-4.0"},
+            }
+        ],
+    }
+    session.route("GET", "/trainings/uuid/kept-run", ok(kept), ok(kept), ok(kept))
+    session.route("GET", "/models/0123456789abcdef01234560/file", FakeStream(200, weights))
+    session.route("GET", "/models/0123456789abcdef01234560/bundle", FakeStream(200, b"PK zip"))
+    api.models("kept-run")
+    api.download_model("kept-run", directory=tmp_path / "downloaded")
+    api.download_model("kept-run", directory=tmp_path / "downloaded", outputs=True)
     api.suites(slug="road-test", project="road-seg", include_archived=True)
     api.suite("road-test@1")
     api.suite("road-test")
@@ -236,6 +285,26 @@ def recorded(server, session, uploads, tmp_path, monkeypatch, hf):
     main(["check", "--project", "road-seg", "--write"])
     main(["runs"])
     return session.calls
+
+
+def test_the_stored_model_requests_are_among_those_checked(recorded):
+    sent = [(call["method"], call["url"].split("/api", 1)[1], call["json"]) for call in recorded]
+    run = "/trainings/0123456789abcdef01234567"
+    reserved = [
+        body for method, path, body in sent if method == "POST" and path == f"{run}/models/upload-url"
+    ]
+    assert [body["format"] for body in reserved] == ["pth", "onnx"]
+    claims = [
+        body
+        for method, path, body in sent
+        if method == "POST" and path == f"{run}/models" and body.get("provider") == "visin"
+    ]
+    assert [claim["format"] for claim in claims] == ["pth", "onnx"]
+    assert claims[0]["license"] == {"id": "cc-by-4.0"} and claims[1]["sourceSha256"] == claims[0]["sha256"]
+    downloads = [path for method, path, _ in sent if method == "GET" and "/models/" in path]
+    assert any(path.endswith("/file") for path in downloads) and any(
+        path.endswith("/bundle") for path in downloads
+    )
 
 
 def test_every_request_is_one_the_api_defines(spec, recorded):

@@ -49,6 +49,7 @@ from .shortcuts import (
     log_epoch,
     log_model,
     log_test_results,
+    save_model,
     update,
     upload_visualization,
 )
@@ -115,6 +116,7 @@ __all__ = [
     "read_settings",
     "read_split",
     "remove_cached",
+    "save_model",
     "sha256_of",
     "sync",
     "system_info",

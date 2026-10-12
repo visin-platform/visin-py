@@ -62,7 +62,7 @@ class TestCheckpoints:
         assert visin.local_checkpoint(copy)["sha256"] == visin.local_checkpoint(weights)["sha256"]
 
     def test_a_large_file_is_hashed_in_blocks(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("visin.evaluation._BLOCK", 4)
+        monkeypatch.setattr("visin._internal.transport.HASH_BLOCK", 4)
         path = tmp_path / "big.bin"
         path.write_bytes(b"0123456789")
         assert visin.sha256_of(path) == hashlib.sha256(b"0123456789").hexdigest()

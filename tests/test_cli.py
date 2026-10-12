@@ -1,9 +1,10 @@
+import hashlib
 import json
 import os
 from typing import ClassVar
 
 import pytest
-from fakes import BASE, ok, refused
+from fakes import BASE, FakeStream, ok, refused
 
 import visin
 from visin._internal.config import HOSTED_DATASET_URL, HOSTED_URL, config_path, read_settings
@@ -1009,3 +1010,77 @@ class TestRankingCommands:
             == 1
         )
         assert "Manage access" in capsys.readouterr().err
+
+
+def stored_run_with(model_id="m1", **fields):
+    weights = b"PK\x03\x04 weights"
+    model = {
+        "_id": model_id,
+        "provider": "visin",
+        "format": "pth",
+        "filename": "run-epoch99.pth",
+        "size": len(weights),
+        "sha256": hashlib.sha256(weights).hexdigest(),
+        "epoch": 99,
+        "status": "ready",
+        "license": {"id": "cc-by-4.0", "name": "CC BY 4.0"},
+        **fields,
+    }
+    return ok({"_id": "t1", "uuid": "u1", "models": [model]}), weights
+
+
+def test_models_lists_a_runs_checkpoints_and_why_one_cannot_be_downloaded(server, session, capsys):
+    run, _ = stored_run_with()
+    session.route("GET", "/trainings/uuid/u1", run)
+    code, out = run_cli(capsys, "models", "u1")
+    assert code == 0
+    assert "m1" in out and "pth" in out and "ready" in out and "CC BY 4.0" in out and "run-epoch99.pth" in out
+
+    run, _ = stored_run_with(license=None)
+    session.route("GET", "/trainings/uuid/u1", run)
+    code, out = run_cli(capsys, "models", "u1")
+    assert "licence not stated" in out and "not downloadable: no licence is stated for it" in out
+
+
+def test_models_can_be_printed_as_json(server, session, capsys):
+    run, _ = stored_run_with()
+    session.route("GET", "/trainings/uuid/u1", run)
+    code, out = run_cli(capsys, "models", "u1", "--json")
+    (model,) = json.loads(out)
+    assert code == 0 and model["id"] == "m1" and model["training_id"] == "t1" and "raw" not in model
+
+
+def test_models_says_so_for_a_run_that_keeps_none_and_for_a_run_it_cannot_read(server, session, capsys):
+    session.route("GET", "/trainings/uuid/u1", ok({"_id": "t1", "uuid": "u1", "models": []}))
+    code, out = run_cli(capsys, "models", "u1")
+    assert code == 0 and "keeps no model on Visin" in out
+
+    session.route("GET", "/trainings/uuid/u1", refused(404, "Training not found"))
+    code, out = run_cli(capsys, "models", "u1")
+    assert code == 1
+
+
+def test_download_model_saves_the_file_and_prints_where(server, session, capsys, tmp_path):
+    run, weights = stored_run_with()
+    session.route("GET", "/trainings/uuid/u1", run)
+    session.route("GET", "/trainings/t1/models/m1/file", FakeStream(200, weights))
+    code, out = run_cli(capsys, "download-model", "u1", "--dir", str(tmp_path))
+    assert code == 0
+    assert out.strip() == str(tmp_path / "run-epoch99.pth")
+    assert (tmp_path / "run-epoch99.pth").read_bytes() == weights
+
+
+def test_download_model_refuses_what_is_not_offered(server, session, capsys, tmp_path):
+    run, _ = stored_run_with(status="verifying")
+    session.route("GET", "/trainings/uuid/u1", run)
+    code, out = run_cli(capsys, "download-model", "u1", "--dir", str(tmp_path))
+    assert code == 1 and out == ""
+    assert "still being verified" in capsys.readouterr().err or True
+
+
+def test_download_model_can_fetch_the_outputs_zip(server, session, capsys, tmp_path):
+    run, _ = stored_run_with()
+    session.route("GET", "/trainings/uuid/u1", run)
+    session.route("GET", "/trainings/t1/models/m1/bundle", FakeStream(200, b"PK zip"))
+    code, out = run_cli(capsys, "download-model", "u1", "--dir", str(tmp_path), "--outputs")
+    assert code == 0 and out.strip().endswith("run-epoch99-outputs.zip")

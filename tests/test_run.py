@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -310,6 +311,198 @@ def test_unsupported_or_missing_files_are_refused_at_the_call(client, session, t
     assert session.calls == []
     assert "not .txt" in caplog.records[0].message
     assert "no such file" in caplog.records[1].message
+
+
+# ---------------------------------------------------------------- stored models
+
+
+def model_grant(file_id="models/t1/a.pth"):
+    return ok({"uploadUrl": f"{BASE}/files/upload/{file_id}?sig=1", "fileId": file_id, "maxBytes": 2**32})
+
+
+def test_save_model_reserves_uploads_and_claims_the_file(client, session, uploads, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}))
+    session.route("POST", "/trainings/t1/models/upload-url", model_grant())
+    session.route("POST", "/trainings/t1/models", ok([{"_id": "m1"}], status=201))
+    weights = tmp_path / "best.pth"
+    weights.write_bytes(b"PK\x03\x04 weights")
+    run = make_run(client, spool=visin._internal.spool.Spool(tmp_path / "d", "run-1"))
+    digest = run.save_model(
+        weights, epoch=99, licence="cc-by-4.0", credit="TalTech", model_info={"backbone": "clft"}
+    )
+    run.flush()
+
+    assert digest == hashlib.sha256(b"PK\x03\x04 weights").hexdigest()
+    assert sent(session, "/trainings/t1/models/upload-url") == [
+        {"format": "pth", "size": len(b"PK\x03\x04 weights")}
+    ]
+    assert uploads.puts[0]["url"] == f"{BASE}/files/upload/models/t1/a.pth?sig=1"
+    assert uploads.puts[0]["bytes"] == b"PK\x03\x04 weights"
+    assert sent(session, "/trainings/t1/models") == [
+        {
+            "provider": "visin",
+            "kind": "model",
+            "fileId": "models/t1/a.pth",
+            "format": "pth",
+            "epoch": 99,
+            "license": {"id": "cc-by-4.0"},
+            "credit": "TalTech",
+            "sha256": digest,
+            "modelInfo": {"backbone": "clft"},
+        }
+    ]
+    # Once delivered, the copy kept for the sake of a retry is gone.
+    assert list((tmp_path / "d" / "runs" / "run-1.files").glob("*")) == []
+
+
+def test_an_onnx_export_names_the_weights_it_came_from(client, session, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}))
+    session.route("POST", "/trainings/t1/models/upload-url", model_grant("models/t1/a.onnx"))
+    session.route("POST", "/trainings/t1/models", ok([], status=201))
+    export = tmp_path / "best.onnx"
+    export.write_bytes(b"\x08\x09 onnx")
+    run = make_run(client)
+    run.save_model(
+        export,
+        epoch=99,
+        licence={"id": "other", "name": "Acme terms", "url": "https://acme.test/terms"},
+        source_sha256="a" * 64,
+        parity={"maxAbsDiff": 1e-6, "argmaxMismatchFraction": 0.0, "frames": 48},
+        keep_copy=False,
+    )
+    run.flush()
+    claim = sent(session, "/trainings/t1/models")[0]
+    assert claim["format"] == "onnx" and claim["sourceSha256"] == "a" * 64
+    assert claim["license"] == {"id": "other", "name": "Acme terms", "url": "https://acme.test/terms"}
+    assert claim["parity"] == {"maxAbsDiff": 1e-6, "argmaxMismatchFraction": 0.0, "frames": 48}
+
+
+def test_a_pt_file_is_a_pth_and_a_format_can_be_given_for_an_odd_name(client, session, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}))
+    session.route("POST", "/trainings/t1/models/upload-url", model_grant(), model_grant())
+    session.route("POST", "/trainings/t1/models", ok([], status=201), ok([], status=201))
+    first, second = tmp_path / "w.pt", tmp_path / "weights.bin"
+    first.write_bytes(b"a")
+    second.write_bytes(b"b")
+    run = make_run(client)
+    run.save_model(first, epoch=1)
+    run.save_model(second, epoch=2, file_format="PTH")
+    run.flush()
+    assert [body["format"] for body in sent(session, "/trainings/t1/models/upload-url")] == ["pth", "pth"]
+
+
+def test_a_checkpoint_that_cannot_be_kept_is_refused_at_the_call(client, session, tmp_path, caplog):
+    notes = tmp_path / "notes.txt"
+    notes.write_text("x")
+    weights = tmp_path / "w.pth"
+    weights.write_bytes(b"x")
+    run = make_run(client)
+    with caplog.at_level(logging.WARNING, logger="visin"):
+        assert run.save_model(notes) is None
+        assert run.save_model(tmp_path / "missing.pth") is None
+        assert run.save_model(weights, epoch=1.5) is None
+    run.flush()
+    assert session.calls == []
+    assert "not '.txt'" in caplog.records[0].message
+    assert "no such checkpoint" in caplog.records[1].message
+    assert "whole number" in caplog.records[2].message
+
+
+def test_a_checkpoint_the_server_already_holds_is_not_sent_again(client, session, uploads, tmp_path):
+    weights = tmp_path / "best.pth"
+    weights.write_bytes(b"PK\x03\x04 weights")
+    digest = hashlib.sha256(b"PK\x03\x04 weights").hexdigest()
+    held = {"provider": "visin", "format": "pth", "sha256": digest, "epoch": 3, "status": "ready"}
+    session.route("GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}))
+    session.route("GET", "/trainings/t1", ok({"_id": "t1", "models": [held]}))
+    run = make_run(client)
+    run.save_model(weights, epoch=3, keep_copy=False)
+    run.flush()
+    assert uploads.puts == []
+    assert sent(session, "/trainings/t1/models/upload-url") == []
+    assert sent(session, "/trainings/t1/models") == []
+
+
+@pytest.mark.parametrize(
+    "held",
+    [
+        {"status": "verifying"},
+        {"epoch": 4},
+        {"format": "onnx"},
+        {"sha256": "0" * 64},
+        {"provider": "hf"},
+    ],
+)
+def test_a_checkpoint_is_sent_when_what_the_server_holds_is_not_this_file(
+    client, session, uploads, tmp_path, held
+):
+    weights = tmp_path / "best.pth"
+    weights.write_bytes(b"PK\x03\x04 weights")
+    digest = hashlib.sha256(b"PK\x03\x04 weights").hexdigest()
+    other = {"provider": "visin", "format": "pth", "sha256": digest, "epoch": 3, "status": "ready", **held}
+    session.route("GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}))
+    session.route("GET", "/trainings/t1", ok({"_id": "t1", "models": [other]}))
+    session.route("POST", "/trainings/t1/models/upload-url", model_grant())
+    session.route("POST", "/trainings/t1/models", ok([], status=201))
+    run = make_run(client)
+    run.save_model(weights, epoch=3, keep_copy=False)
+    run.flush()
+    assert len(uploads.puts) == 1 and len(sent(session, "/trainings/t1/models")) == 1
+
+
+def test_a_checkpoint_is_sent_when_the_server_cannot_say_what_it_holds(client, session, uploads, tmp_path):
+    weights = tmp_path / "best.pth"
+    weights.write_bytes(b"PK\x03\x04 weights")
+    session.route("GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}))
+    session.route("GET", "/trainings/t1", refused(500, "down"))
+    session.route("POST", "/trainings/t1/models/upload-url", model_grant())
+    session.route("POST", "/trainings/t1/models", ok([], status=201))
+    run = make_run(client)
+    run.save_model(weights, epoch=3, keep_copy=False)
+    run.flush()
+    assert len(uploads.puts) == 1
+
+
+def test_a_finished_run_keeps_nothing(client, session, tmp_path):
+    weights = tmp_path / "w.pth"
+    weights.write_bytes(b"x")
+    run = make_run(client)
+    run.finish()
+    assert run.save_model(weights) is None
+
+
+def test_a_disabled_run_keeps_nothing(tmp_path):
+    weights = tmp_path / "w.pth"
+    weights.write_bytes(b"x")
+    run = visin.init("n", project="p", mode="disabled")
+    assert run.mode == "disabled"
+    assert run.save_model(weights) is None
+
+
+def test_a_file_that_is_gone_when_delivery_comes_is_reported_not_raised(client, session, tmp_path, caplog):
+    session.route("GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}))
+    weights = tmp_path / "w.pth"
+    weights.write_bytes(b"x")
+    run = make_run(client)
+    blocker = __import__("threading").Event()
+    run._delivery.sender.submit(blocker.wait)
+    run.save_model(weights, keep_copy=False)  # sent from where it was, which training then deletes
+    weights.unlink()
+    with caplog.at_level(logging.WARNING, logger="visin"):
+        blocker.set()
+        run.flush()
+    assert sent(session, "/trainings/t1/models/upload-url") == []
+
+
+def test_an_upload_url_without_a_file_id_is_an_error_not_a_crash(client, session, uploads, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}))
+    session.route("POST", "/trainings/t1/models/upload-url", ok({"uploadUrl": f"{BASE}/x"}))
+    weights = tmp_path / "w.pth"
+    weights.write_bytes(b"x")
+    run = make_run(client)
+    run.save_model(weights, keep_copy=False)
+    run.flush()
+    assert uploads.puts == [] and sent(session, "/trainings/t1/models") == []
 
 
 # ---------------------------------------------------------------- creation
@@ -1103,3 +1296,70 @@ def test_a_catch_up_waits_while_a_sync_holds_the_lock(client, session, tmp_path)
         assert run._delivery.catch_up(force=True) is False
     assert spool.count() == 1
     assert run._delivery.catch_up(force=True) is True
+
+
+def test_model_claim_retry_reuses_uploaded_bytes_after_a_lost_answer(client, session, uploads, tmp_path):
+    from visin._internal.reports import DeliveryContext, deliver
+
+    source = tmp_path / "model.pth"
+    source.write_bytes(b"weights")
+    context = DeliveryContext(retries=0)
+    session.route("GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}))
+    session.route("POST", "/trainings/t1/models/upload-url", model_grant("models/t1/original.pth"))
+    session.route("POST", "/trainings/t1/models", requests.exceptions.ConnectionError("lost answer"), ok([]))
+    op = {
+        "op": "model_file",
+        "training_uuid": "run-1",
+        "path": str(source),
+        "body": {"format": "pth", "epoch": 7},
+    }
+    with pytest.raises(TransportError):
+        deliver(client, op, context)
+    kept = json.loads(json.dumps(op))
+    assert kept["uploaded"] is True
+    deliver(client, kept, context)
+    assert len(sent(session, "/trainings/t1/models/upload-url")) == 1
+    assert len(uploads.puts) == 1
+    assert [body["fileId"] for body in sent(session, "/trainings/t1/models")] == [
+        "models/t1/original.pth"
+    ] * 2
+
+
+def test_finish_timeout_keeps_active_model_upload_and_its_copy_for_sync(client, session, uploads, tmp_path):
+    import threading
+
+    from visin._internal.reports import DeliveryContext, deliver
+
+    source = tmp_path / "model.pth"
+    source.write_bytes(b"weights")
+    run = make_run(client, spool=visin._internal.spool.Spool(tmp_path / "reports", "run-1"))
+    session.route(
+        "GET", "/trainings/uuid/run-1", ok({"_id": "t1", "uuid": "run-1"}), ok({"_id": "t1", "uuid": "run-1"})
+    )
+    session.route("POST", "/trainings/t1/models/upload-url", model_grant("models/t1/active.pth"))
+    session.route("POST", "/trainings/t1/models", ok([]), ok([]))
+    entered, release = threading.Event(), threading.Event()
+    original = client.put_file_chunked
+
+    def paused(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    client.put_file_chunked = paused
+    run.save_model(source, epoch=7)
+    assert entered.wait(2)
+    run.finish(timeout=0.01)
+    spool = run._delivery.spool
+    assert spool is not None
+    kept = json.loads(spool.path.read_text().splitlines()[0])
+    assert kept["op"] == "model_file" and kept["upload"]["fileId"] == "models/t1/active.pth"
+    staged = spool.files / kept["staged"]
+    release.set()
+    assert run._delivery.sender is not None
+    run._delivery.sender._thread.join(2)
+    assert not run._delivery.sender._thread.is_alive()
+    assert staged.read_bytes() == b"weights"
+    client.put_file_chunked = original
+    deliver(client, kept, DeliveryContext(files=spool.files, retries=0))
+    assert sent(session, "/trainings/t1/models")[-1]["fileId"] == "models/t1/active.pth"

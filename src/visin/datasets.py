@@ -233,6 +233,7 @@ class Datasets:
                     "id": dataset_id,
                     "name": dataset.name,
                     "revision": revision,
+                    "archiveRevision": revision,
                     "size": size,
                     "file": zip_path.name,
                 }

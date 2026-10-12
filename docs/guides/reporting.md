@@ -146,6 +146,45 @@ sees it. The project must keep its storage on Hugging Face (project settings, **
 Visin refuses the link, and the checkpoint is then on the Hub but not shown on the run. A failure is logged,
 never raised into training; the call returns the commit hash, or `None` when nothing was uploaded.
 
+## Checkpoints kept on Visin
+
+```python
+digest = run.save_model(
+    "checkpoints/best.pth",
+    epoch=12,
+    licence="cc-by-4.0",
+    credit="Acme Robotics",
+    model_info={"backbone": "clftv2", "transforms": {"resize": 384}},
+)
+run.save_model("export/best.onnx", epoch=12, licence="cc-by-4.0", source_sha256=digest)
+```
+
+Transient retries retain the upload reservation and resume the same file. A lost claim response repeats
+only that claim after upload completion. If `finish()` times out during a large model upload, its op and
+staged copy remain on disk for `visin sync`, even if the sender finishes later. A download checks the
+whole-file `Repr-Digest` when present, including on a ranged response, against the recorded model digest.
+
+
+Where `log_model` links a repo on the Hub and keeps no bytes, `save_model` uploads the file to your Visin, so
+the run offers it for download, in the models list and over the API. It takes a PyTorch `.pth` or an
+`.onnx` export, and returns the file's SHA-256, which is how a checkpoint is named: give a `.pth`'s digest as
+`source_sha256` with the `.onnx` made from it, and the two are one model with two formats to evaluations and
+leaderboards.
+
+A model is served only when two things hold. Visin has read the stored file and found it to be the file you
+sent (the run shows it as *being verified* until then; a file that does not match the digest is refused and
+deleted), and you have stated the `licence` it is shared under, an id such as `"cc-by-4.0"` or a mapping like
+`{"id": "other", "name": "Acme terms", "url": "https://..."}`. Without a licence the model is stored but not
+offered: say so deliberately. `credit` is the attribution shown with it, `model_info` is what the weights
+record about the network and its input (kept as given, so a consumer knows the resize and normalisation), and
+`parity` is an export's agreement with its weights.
+
+The file goes up in pieces, which gets a large checkpoint past a proxy's request-size limit and lets it resume
+after a dropped connection. With `keep_copy=True` (the default) it is first copied beside the run's reports, so
+it can still be sent if training has since overwritten or deleted it; that costs the disk, and
+`keep_copy=False` sends the original instead. One file is kept per format and epoch: sending a different
+file for the same slot is refused until the first is unlinked. A failure is logged, never raised into training.
+
 ## Config
 
 ```python
@@ -198,8 +237,8 @@ visin.log_epoch(epoch, train={"loss": loss})
 ```
 
 `visin.get_run()` returns that run, for anything the shortcuts do not cover.
-`log_epoch`, `log_test_results`, `log_benchmark`, `log_config`, `log_model`, `upload_visualization`, `update` and
-`finish` all take what the `Run` methods take. With no run started they do nothing, like a disabled
+`log_epoch`, `log_test_results`, `log_benchmark`, `log_config`, `log_model`, `save_model`, `upload_visualization`,
+`update` and `finish` all take what the `Run` methods take. With no run started they do nothing, like a disabled
 run. A run made with `Run.create` directly is yours to hold and is not made current. With two runs in
 one process, call the methods on the one you mean.
 

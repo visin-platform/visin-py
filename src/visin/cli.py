@@ -381,6 +381,60 @@ def cmd_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _model_row(model: Any) -> str:
+    size = _size(model.size) if model.size is not None else "-"
+    licence = (
+        (model.license.get("name") or model.license.get("id")) if model.license else "licence not stated"
+    )
+    state = model.status or "-"
+    return (
+        f"{model.id:24}  {model.format:5}  {size:>9}  {state:9}  "
+        f"epoch {model.epoch if model.epoch is not None else '-':<4}  {licence}  {model.filename or ''}"
+    )
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    from .api import Api
+
+    try:
+        api = Api(args.url, args.token)
+    except VisinError as exc:
+        print(f"visin models: {exc}", file=sys.stderr)
+        return 1
+    with api:
+        try:
+            models = api.models(args.run)
+        except VisinError as exc:
+            print(f"visin models: {exc}", file=sys.stderr)
+            return 1
+    if args.json:
+        _print_json([{k: v for k, v in dataclasses.asdict(model).items() if k != "raw"} for model in models])
+        return 0
+    if not models:
+        print("this run keeps no model on Visin")
+    for model in models:
+        print(_model_row(model))
+        if model.refusal:
+            print(f"{'':24}  not downloadable: {model.refusal}")
+    return 0
+
+
+def cmd_download_model(args: argparse.Namespace) -> int:
+    from .api import Api
+
+    logging.getLogger("visin").setLevel(logging.INFO)
+    try:
+        with Api(args.url, args.token) as api:
+            path = api.download_model(
+                args.run, args.model, args.dir, file_format=args.format, outputs=args.outputs
+            )
+    except VisinError as exc:
+        print(f"visin download-model: {exc}", file=sys.stderr)
+        return 1
+    print(path)
+    return 0
+
+
 def cmd_datasets(args: argparse.Namespace) -> int:
     from .datasets import Datasets
 
@@ -960,6 +1014,31 @@ def build_parser() -> argparse.ArgumentParser:
     runs.add_argument("--limit", type=int, default=20)
     runs.add_argument("--json", action="store_true", help="print the runs as JSON, with a link to each")
     runs.set_defaults(handler=cmd_runs)
+
+    models = commands.add_parser("models", help="list the checkpoints a run kept on Visin")
+    server(models)
+    models.add_argument("run", help="the run's UUID")
+    models.add_argument("--json", action="store_true", help="print the models as JSON")
+    models.set_defaults(handler=cmd_models)
+
+    fetch_model = commands.add_parser(
+        "download-model", help="download a checkpoint a run kept on Visin, checked against its SHA-256"
+    )
+    server(fetch_model)
+    fetch_model.add_argument("run", help="the run's UUID")
+    fetch_model.add_argument(
+        "--model", help="the model's id, from `visin models` (default: the run's only one)"
+    )
+    fetch_model.add_argument(
+        "--format", choices=["pth", "onnx"], help="which format, when the run keeps both"
+    )
+    fetch_model.add_argument("--dir", default=".", help="where to save it (default: the current folder)")
+    fetch_model.add_argument(
+        "--outputs",
+        action="store_true",
+        help="download instead the zip of what the model produced (predictions, confidence, results)",
+    )
+    fetch_model.set_defaults(handler=cmd_download_model)
 
     def dataset_server(sub: argparse.ArgumentParser) -> None:
         sub.add_argument("--url", help="the Visin dataset service (default: VISIN_DATASET_URL)")

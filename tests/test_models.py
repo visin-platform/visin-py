@@ -316,3 +316,70 @@ def test_a_failed_model_card_upload_still_links_the_uploaded_checkpoint(run, ses
     assert uploaded(hf) == ["best.pt"]
     assert links(session)[0]["revision"] == COMMIT
     assert "model card could not be added" in caplog.text
+
+
+# ---------------------------------------------------------------- stored models
+
+
+def test_a_run_separates_the_models_it_keeps_from_the_ones_it_links():
+    from visin import Training
+
+    run = Training.from_json(
+        {
+            "_id": "t1",
+            "uuid": "u1",
+            "models": [
+                {"provider": "hf", "repo": "acme/clft", "revision": "a" * 40},
+                {
+                    "_id": "m1",
+                    "provider": "visin",
+                    "format": "pth",
+                    "filename": "run-epoch99.pth",
+                    "size": 1073741824,
+                    "sha256": "b" * 64,
+                    "epoch": 99,
+                    "status": "ready",
+                    "license": {"id": "cc-by-4.0", "name": "CC BY 4.0"},
+                    "credit": "TalTech",
+                    "modelInfo": {"backbone": "clft"},
+                },
+            ],
+        }
+    )
+    assert len(run.models) == 2
+    (model,) = run.stored_models
+    assert (model.id, model.training_id, model.format, model.epoch) == ("m1", "t1", "pth", 99)
+    assert model.size == 1073741824 and model.model_info == {"backbone": "clft"}
+    assert model.downloadable and model.refusal is None
+
+
+@pytest.mark.parametrize(
+    ("fields", "why"),
+    [
+        ({"status": "verifying"}, "still being verified"),
+        ({"status": "failed", "verifyError": "bad digest"}, "failed verification: bad digest"),
+        ({"status": "failed"}, "failed verification: unknown reason"),
+        ({"status": "ready"}, "no licence is stated for it"),
+    ],
+)
+def test_a_stored_model_says_why_it_cannot_be_downloaded(fields, why):
+    from visin.models import StoredModel
+
+    model = StoredModel.from_json(
+        {"_id": "m1", "provider": "visin", "format": "onnx", **fields}, training_id="t1"
+    )
+    assert not model.downloadable
+    assert model.refusal == why
+
+
+def test_a_stored_model_tolerates_what_the_server_leaves_out():
+    from visin.models import StoredModel
+
+    model = StoredModel.from_json({"_id": "m1", "size": True, "epoch": "x"})
+    assert (model.format, model.size, model.epoch, model.license, model.filename) == (
+        "",
+        None,
+        None,
+        {},
+        None,
+    )

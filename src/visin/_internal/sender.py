@@ -47,6 +47,7 @@ class Sender:
         self._abandoned = threading.Event()
         self._started = False
         self._lock = threading.Lock()
+        self.in_flight: Callable[[], None] | None = None
         self._heartbeat: Callable[[], None] | None = None
         self._heartbeat_interval = 30.0
         self._next_heartbeat = 0.0
@@ -105,14 +106,18 @@ class Sender:
                 if isinstance(item, _Barrier):
                     item.event.set()
                     continue
-                if self._abandoned.is_set():
-                    self.leftover.append(item)
-                    continue
+                with self._lock:
+                    if self._abandoned.is_set():
+                        self.leftover.append(item)
+                        continue
+                    self.in_flight = item
                 item()
             except Exception as exc:
                 self.failed += 1
                 logger.warning("visin: report failed: %s", exc)
             finally:
+                with self._lock:
+                    self.in_flight = None
                 self._queue.task_done()
 
     def flush(self, timeout: float = 30.0) -> bool:
@@ -134,7 +139,9 @@ class Sender:
             return False
         return True
 
-    def stop(self, timeout: float = 30.0) -> bool:
+    def stop(
+        self, timeout: float = 30.0, *, retain: Callable[[Callable[[], None]], None] | None = None
+    ) -> bool:
         """Flush, then retire the thread.
 
         When the flush times out, whatever is still queued is not attempted: it
@@ -147,7 +154,10 @@ class Sender:
         if not self._started:
             return flushed
         if not flushed:
-            self._abandoned.set()
+            with self._lock:
+                self._abandoned.set()
+                if self.in_flight is not None and retain is not None:
+                    retain(self.in_flight)
             while True:
                 try:
                     item = self._queue.get_nowait()

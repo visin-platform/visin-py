@@ -9,3 +9,6 @@ from __future__ import annotations
 
 HUB = "hf"
 """Hugging Face: a model or dataset pinned to a full commit of a Hub repo."""
+
+VISIN = "visin"
+"""A model whose bytes Visin keeps itself: a checkpoint a run uploaded, as ``.pth`` or ``.onnx``."""

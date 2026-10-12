@@ -24,7 +24,7 @@ from ._internal.process import ProcessHooks, rank
 from ._internal.reports import discard_staged, fetch_model_card
 from ._internal.serialize import to_jsonable
 from ._internal.spool import Spool
-from ._internal.transport import HttpClient, worth_retrying_later
+from ._internal.transport import HttpClient, file_sha256, worth_retrying_later
 from .errors import ConfigurationError, VisinError
 
 logger = logging.getLogger("visin")
@@ -706,6 +706,92 @@ class Run:
         body = model_payload(repo, revision, path=stored, epoch=number)
         self._emit({"op": "model", "training_uuid": self.training_uuid, "body": body})
         return revision
+
+    def save_model(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        epoch: int | float | None = None,
+        file_format: str | None = None,
+        licence: str | Mapping[str, Any] | None = None,
+        credit: str | None = None,
+        model_info: Mapping[str, Any] | None = None,
+        source_sha256: str | None = None,
+        parity: Mapping[str, Any] | None = None,
+        keep_copy: bool = True,
+    ) -> str | None:
+        """Keep a checkpoint on Visin itself and link it to this run.
+
+        Unlike :meth:`log_model`, which links a repo on the Hugging Face Hub and keeps no bytes, this
+        uploads the
+        file to your Visin: the run then offers it for download, in the models list and over the API. It
+        takes a
+        PyTorch ``.pth`` or an ``.onnx`` export; ``file_format`` says which when the extension does not.
+
+        The file is read once here to take its SHA-256, which is returned and is how a checkpoint is
+        named: pass
+        a ``.pth``'s digest as ``source_sha256`` with the ``.onnx`` made from it, and both are one model to
+        evaluations and leaderboards. Visin reads the stored file again and refuses one that is not the file
+        this digest names.
+
+        ``licence`` is what the checkpoint is shared under: an id such as ``"cc-by-4.0"``, or a mapping like
+        ``{"id": "other", "name": "Acme research terms", "url": "https://..."}``. A model with none is stored
+        but not offered for download, so state one deliberately. ``credit`` is the attribution to show.
+        ``model_info`` is what the weights record about the network and its input (visin-fusion writes its own
+        into every checkpoint), kept as given; ``parity`` is an export's agreement with its weights.
+
+        The upload is large, so it goes in pieces and survives a dropped connection. With ``keep_copy`` (the
+        default) the file is first copied beside the run's reports, so it can be sent later even if training
+        has since overwritten or deleted it, at the cost of that disk; pass ``False`` to send the original.
+
+        Returns the SHA-256 of the file, or ``None`` when nothing was kept; a failure is logged, never raised
+        into training.
+        """
+        if not self._accepting() or not self.training_uuid:
+            return None
+        op: dict[str, Any] | None = None
+        try:
+            source = Path(path).expanduser()
+            if not source.is_file():
+                raise FileNotFoundError(f"no such checkpoint: {source}")
+            kind = (file_format or source.suffix.lstrip(".")).lower()
+            if kind == "pt":
+                kind = "pth"
+            if kind not in ("pth", "onnx"):
+                raise ValueError(
+                    f"a checkpoint is a .pth or an .onnx file, not {source.suffix or source.name!r}"
+                )
+            number = None if epoch is None else epoch_number(epoch)
+            if isinstance(number, float):
+                raise ValueError("a checkpoint's epoch must be a whole number")
+            digest = file_sha256(str(source))
+            body: dict[str, Any] = {"format": kind, "sha256": digest}
+            if number is not None:
+                body["epoch"] = number
+            if licence is not None:
+                body["license"] = {"id": licence} if isinstance(licence, str) else dict(licence)
+            if credit:
+                body["credit"] = credit
+            if source_sha256:
+                body["sourceSha256"] = source_sha256
+            if model_info:
+                body["modelInfo"] = dict(model_info)
+            if parity:
+                body["parity"] = dict(parity)
+            op = {"op": "model_file", "training_uuid": self.training_uuid}
+            spool = self._delivery.spool
+            if keep_copy and spool is not None:
+                op["staged"] = spool.stage(source)
+            else:
+                op["path"] = os.path.abspath(source)
+            op["body"] = self._jsonable(body, "model")
+        except (ConfigurationError, OSError, TypeError, ValueError) as exc:
+            if op is not None:
+                discard_staged(op, self._delivery.context)
+            self._handle(exc, "save model")
+            return None
+        self._emit(op)
+        return digest
 
     def _model_card(self, repo: str, epoch: int | float | None) -> str | None:
         client = self._delivery.client

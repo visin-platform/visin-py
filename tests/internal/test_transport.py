@@ -1,9 +1,12 @@
+import base64
+import hashlib
+
 import pytest
 import requests
-from fakes import BASE, FakeResponse, FakeSession, ok, refused
+from fakes import BASE, FakeResponse, FakeSession, FakeStream, ok, refused
 from urllib3.exceptions import MaxRetryError, NewConnectionError, ProtocolError
 
-from visin._internal.transport import HttpClient, never_sent, worth_retrying_later
+from visin._internal.transport import HttpClient, file_sha256, never_sent, worth_retrying_later
 from visin.errors import ApiError, TransportError
 
 
@@ -215,3 +218,211 @@ def test_an_address_without_a_scheme_is_https_and_a_pasted_token_loses_its_newli
     client = HttpClient("vision-api.visin.eu/", " vsn_live_abc\n", session=FakeSession())
     assert client.base_url == "https://vision-api.visin.eu/api"
     assert client.session.headers["Authorization"] == "Bearer vsn_live_abc"
+
+
+# ---------------------------------------------------------------- chunked uploads
+
+
+def stored(size):
+    return FakeResponse(200, {"size": size, "complete": False})
+
+
+def test_a_file_that_fits_one_piece_is_one_plain_request(client, uploads, tmp_path):
+    weights = tmp_path / "m.pth"
+    weights.write_bytes(b"0123456789")
+    seen = []
+    client.put_file_chunked(
+        f"{BASE}/signed",
+        str(weights),
+        "application/octet-stream",
+        chunk_bytes=10,
+        progress=lambda done, total: seen.append((done, total)),
+    )
+    assert uploads.puts[0]["bytes"] == b"0123456789"
+    assert "Content-Range" not in uploads.puts[0]["headers"]
+    assert seen == [(10, 10)]
+
+
+def test_a_large_file_goes_up_in_ranges_each_naming_where_it_sits(client, uploads, tmp_path):
+    weights = tmp_path / "m.pth"
+    data = bytes(range(25))
+    weights.write_bytes(data)
+    uploads.answers = [stored(10), stored(20), FakeResponse(200, {"size": 25, "complete": True})]
+    seen = []
+    client.put_file_chunked(
+        f"{BASE}/signed",
+        str(weights),
+        "application/octet-stream",
+        chunk_bytes=10,
+        progress=lambda done, total: seen.append(done),
+    )
+    assert [put["headers"]["Content-Range"] for put in uploads.puts] == [
+        "bytes 0-9/25",
+        "bytes 10-19/25",
+        "bytes 20-24/25",
+    ]
+    assert b"".join(put["bytes"] for put in uploads.puts) == data
+    assert all(put["headers"]["Content-Type"] == "application/octet-stream" for put in uploads.puts)
+    assert seen == [10, 20, 25]
+
+
+def test_a_reply_that_names_no_size_means_the_piece_landed(client, uploads, tmp_path):
+    weights = tmp_path / "m.pth"
+    weights.write_bytes(bytes(range(25)))
+    client.put_file_chunked(f"{BASE}/signed", str(weights), "application/octet-stream", chunk_bytes=10)
+    assert len(uploads.puts) == 3
+
+
+def test_a_server_that_holds_more_than_assumed_is_believed(client, uploads, tmp_path):
+    # A piece whose answer was lost: the server has it, and says so with a 409.
+    weights = tmp_path / "m.pth"
+    data = bytes(range(25))
+    weights.write_bytes(data)
+    uploads.answers = [stored(10), FakeResponse(409, {"size": 20}), stored(25)]
+    client.put_file_chunked(f"{BASE}/signed", str(weights), "application/octet-stream", chunk_bytes=10)
+    assert [put["headers"]["Content-Range"] for put in uploads.puts] == [
+        "bytes 0-9/25",
+        "bytes 10-19/25",
+        "bytes 20-24/25",
+    ]
+
+
+def test_a_piece_is_sent_again_after_a_dropped_connection_or_a_busy_server(client, uploads, sleeps, tmp_path):
+    weights = tmp_path / "m.pth"
+    weights.write_bytes(bytes(range(15)))
+    uploads.answers = [dropped_mid_request(), FakeResponse(503, None, text="busy"), stored(10), stored(15)]
+    client.put_file_chunked(f"{BASE}/signed", str(weights), "application/octet-stream", chunk_bytes=10)
+    # The first piece is tried three times (dropped, busy, landed), the second once.
+    assert [put["headers"]["Content-Range"] for put in uploads.puts] == [
+        "bytes 0-9/15",
+        "bytes 0-9/15",
+        "bytes 0-9/15",
+        "bytes 10-14/15",
+    ]
+    assert len(sleeps) == 2
+
+
+def test_a_refusal_ends_the_upload_with_what_the_server_said(client, uploads, tmp_path):
+    weights = tmp_path / "m.pth"
+    weights.write_bytes(bytes(range(25)))
+    uploads.answers = [stored(10), FakeResponse(403, None, text="expired")]
+    with pytest.raises(ApiError, match="expired") as caught:
+        client.put_file_chunked(f"{BASE}/signed", str(weights), "application/octet-stream", chunk_bytes=10)
+    assert caught.value.status == 403
+
+
+def test_an_upload_that_never_gets_past_a_piece_gives_up(client, uploads, tmp_path):
+    weights = tmp_path / "m.pth"
+    weights.write_bytes(bytes(range(25)))
+    uploads.answers = [stored(0)] * 10
+    with pytest.raises(TransportError, match="no progress"):
+        client.put_file_chunked(f"{BASE}/signed", str(weights), "application/octet-stream", chunk_bytes=10)
+
+
+def test_an_upload_whose_server_keeps_changing_its_mind_gives_up(client, uploads, tmp_path):
+    weights = tmp_path / "m.pth"
+    weights.write_bytes(bytes(range(25)))
+    uploads.answers = [FakeResponse(409, {"size": size}) for size in range(1, 12)]
+    with pytest.raises(TransportError, match="resynchronise"):
+        client.put_file_chunked(f"{BASE}/signed", str(weights), "application/octet-stream", chunk_bytes=10)
+
+
+def test_a_conflict_that_names_where_we_already_are_is_a_refusal_after_the_retries(client, uploads, tmp_path):
+    # The server is still finishing an earlier attempt at this piece: worth a pause, and then it is an error.
+    weights = tmp_path / "m.pth"
+    weights.write_bytes(bytes(range(25)))
+    uploads.answers = [FakeResponse(409, {"size": 0})] * 10
+    with pytest.raises(ApiError) as caught:
+        client.put_file_chunked(f"{BASE}/signed", str(weights), "application/octet-stream", chunk_bytes=10)
+    assert caught.value.status == 409
+
+
+def test_a_connection_that_stays_down_ends_the_upload(client, uploads, tmp_path):
+    weights = tmp_path / "m.pth"
+    weights.write_bytes(bytes(range(25)))
+    uploads.answers = [connection_refused()] * 10
+    with pytest.raises(TransportError, match="upload to signed URL failed"):
+        client.put_file_chunked(f"{BASE}/signed", str(weights), "application/octet-stream", chunk_bytes=10)
+    uploads.answers = [requests.exceptions.InvalidURL("bad")]
+    with pytest.raises(TransportError, match="upload to signed URL failed"):
+        client.put_file_chunked(f"{BASE}/signed", str(weights), "application/octet-stream", chunk_bytes=10)
+
+
+# ---------------------------------------------------------------- authenticated, verified downloads
+
+
+def test_an_api_download_is_made_as_the_client_and_accepts_any_type(client, session, tmp_path):
+    session.route("GET", "/trainings/t1/models/m1/file", FakeStream(200, b"weights"))
+    target = tmp_path / "m.pth"
+    client.download_file(
+        f"{client.base_url}/trainings/t1/models/m1/file", str(target), size=7, authenticated=True
+    )
+    assert target.read_bytes() == b"weights"
+    call = session.calls[0]
+    assert call["stream"] is True and call["headers"]["Accept"] == "*/*"
+
+
+def test_a_download_with_the_wrong_digest_is_deleted_and_refused(client, session, tmp_path):
+    session.route("GET", "/file", FakeStream(200, b"weights"), FakeStream(200, b"weights"))
+    target = tmp_path / "m.pth"
+    url = f"{client.base_url}/file"
+    with pytest.raises(TransportError, match="SHA-256"):
+        client.download_file(url, str(target), size=7, sha256="0" * 64, authenticated=True)
+    assert not target.exists() and not (tmp_path / "m.pth.part").exists()
+
+    good = hashlib.sha256(b"weights").hexdigest()
+    client.download_file(url, str(target), size=7, sha256=good.upper(), authenticated=True)
+    assert target.read_bytes() == b"weights"
+
+
+def test_file_sha256_reads_a_file_in_pieces(tmp_path):
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * (9 * 2**20))
+    assert file_sha256(str(big)) == hashlib.sha256(b"x" * (9 * 2**20)).hexdigest()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_repr_digest_verifies_whole_model_even_for_a_resumed_download(client, session, tmp_path, partial):
+    data = b"checkpoint weights"
+    digest = hashlib.sha256(data).digest()
+    response = FakeStream(206 if partial else 200, data[5:] if partial else data)
+    response.headers = {"Repr-Digest": "sha-256=:" + base64.b64encode(digest).decode() + ":"}
+    session.route("GET", "/file", response)
+    target = tmp_path / "model.pth"
+    if partial:
+        (tmp_path / "model.pth.part").write_bytes(data[:5])
+    client.download_file(f"{client.base_url}/file", str(target), size=len(data), authenticated=True)
+    assert target.read_bytes() == data
+
+
+@pytest.mark.parametrize("header", ["sha-256=:bad!:", "sha-256=:YQ==:", "sha-256=wrong"])
+def test_invalid_repr_digest_is_refused_before_writing_bytes(client, session, tmp_path, header):
+    response = FakeStream(200, b"weights")
+    response.headers = {"Repr-Digest": header}
+    session.route("GET", "/file", response)
+    target = tmp_path / "model.pth"
+    with pytest.raises(TransportError, match="invalid Repr-Digest"):
+        client.download_file(f"{client.base_url}/file", str(target), authenticated=True)
+    assert not target.exists()
+
+
+def test_repr_digest_must_agree_with_the_recorded_model_digest(client, session, tmp_path):
+    response = FakeStream(200, b"weights")
+    response.headers = {
+        "Repr-Digest": "sha-256=:" + base64.b64encode(hashlib.sha256(b"weights").digest()).decode() + ":"
+    }
+    session.route("GET", "/file", response)
+    with pytest.raises(TransportError, match="does not match"):
+        client.download_file(
+            f"{client.base_url}/file", str(tmp_path / "model.pth"), sha256="0" * 64, authenticated=True
+        )
+
+
+def test_upload_refuses_an_impossible_server_offset_and_nonpositive_chunk_size(client, uploads, tmp_path):
+    path = tmp_path / "weights.pth"
+    path.write_bytes(b"x" * 20)
+    with pytest.raises(ValueError, match="positive"):
+        client.put_file_chunked(f"{BASE}/signed", str(path), "application/octet-stream", chunk_bytes=0)
+    uploads.answers = [stored(21)]
+    with pytest.raises(TransportError, match="reports 21 bytes"):
+        client.put_file_chunked(f"{BASE}/signed", str(path), "application/octet-stream", chunk_bytes=10)

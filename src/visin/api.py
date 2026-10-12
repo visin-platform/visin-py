@@ -24,7 +24,7 @@ from urllib.parse import quote
 from ._internal.config import HOSTED_URL, read_settings
 from ._internal.reports import digest_of
 from ._internal.transport import HttpClient
-from .errors import ConfigurationError
+from .errors import ConfigurationError, VisinError
 from .models import (
     Benchmark,
     Comparison,
@@ -35,6 +35,7 @@ from .models import (
     Leaderboard,
     LeaderboardEntry,
     Project,
+    StoredModel,
     Suite,
     Summary,
     TestResult,
@@ -297,6 +298,85 @@ class Api:
         target.mkdir(parents=True, exist_ok=True)
         path = target / Path(visualization.filename).name
         self._client.download_file(visualization.url, str(path))
+        return path
+
+    # ---------------------------------------------------------------- models
+
+    def models(self, ref: str | Training) -> list[StoredModel]:
+        """The checkpoints a run kept on Visin, one per format (``.pth``, ``.onnx``).
+
+        Each says whether it can be downloaded (:attr:`~visin.models.StoredModel.downloadable`) and, if not,
+        why. A model the run only links on the Hugging Face Hub is not here: it is in ``Training.models``.
+        """
+        return list(self.training(ref).stored_models)
+
+    def _pick_model(
+        self, ref: str | Training, model: str | StoredModel | None, file_format: str | None
+    ) -> StoredModel:
+        if isinstance(model, StoredModel):
+            return model
+        candidates = self.models(ref)
+        if model is not None:
+            found = [item for item in candidates if item.id == model]
+            if not found:
+                raise VisinError(f"the run has no stored model {model!r}")
+            return found[0]
+        if file_format is not None:
+            candidates = [item for item in candidates if item.format == file_format.lower()]
+        if not candidates:
+            raise VisinError(
+                "the run has no model kept on Visin" + (f" in {file_format}" if file_format else "")
+            )
+        if len(candidates) > 1:
+            names = ", ".join(f"{item.id} ({item.format}, epoch {item.epoch})" for item in candidates)
+            raise VisinError(f"the run has several models; say which with model= or file_format=: {names}")
+        return candidates[0]
+
+    def download_model(
+        self,
+        ref: str | Training,
+        model: str | StoredModel | None = None,
+        directory: str | os.PathLike[str] = ".",
+        *,
+        file_format: str | None = None,
+        outputs: bool = False,
+        progress: Any = None,
+    ) -> Path:
+        """Save a stored model's file under ``directory`` and return its path.
+
+        ``model`` is a :class:`~visin.models.StoredModel` or its id; without one the run must keep exactly
+        one (narrow with ``file_format="onnx"``). The file is checked against the SHA-256 Visin recorded, an
+        interrupted download resumes where it stopped, and a file that does not match is deleted and refused.
+
+        With ``outputs=True`` this saves instead the zip of what the model produced on the frames its run
+        was evaluated on: predictions, confidence, the checkpoint's results and a manifest. That zip is built
+        as it is sent, so it is fetched whole and not checked against a digest.
+        """
+        chosen = self._pick_model(ref, model, file_format)
+        if chosen.refusal:
+            raise VisinError(f"model {chosen.id} cannot be downloaded: {chosen.refusal}")
+        target = Path(directory)
+        target.mkdir(parents=True, exist_ok=True)
+        base = f"{chosen.training_id}/models/{quote(chosen.id, safe='')}"
+        if outputs:
+            stem = Path(chosen.filename or f"model.{chosen.format}").stem
+            path = target / f"{stem}-outputs.zip"
+            self._client.download_file(
+                f"{self._client.base_url}/trainings/{base}/bundle",
+                str(path),
+                authenticated=True,
+                progress=progress,
+            )
+            return path
+        path = target / Path(chosen.filename or f"model.{chosen.format}").name
+        self._client.download_file(
+            f"{self._client.base_url}/trainings/{base}/file",
+            str(path),
+            size=chosen.size,
+            sha256=chosen.sha256,
+            authenticated=True,
+            progress=progress,
+        )
         return path
 
     def epochs(self, ref: str | Training) -> list[Epoch]:

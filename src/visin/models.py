@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ._internal.providers import HUB
+from ._internal.providers import HUB, VISIN
 
 
 def _pick(data: Mapping[str, Any], *names: str) -> Any:
@@ -141,6 +141,73 @@ class Comparison:
 
 
 @dataclass(frozen=True)
+class StoredModel:
+    """A checkpoint a run kept on Visin, in one format.
+
+    A ``.pth`` and the ``.onnx`` exported from it are two of these with the same ``source_sha256`` (or,
+    for the
+    ``.pth``, the same ``sha256``): one model in two files. Visin serves a model only when it is ``ready``
+    (its file has been read and matched) and has a ``license``; :attr:`downloadable` says which.
+    """
+
+    id: str
+    training_id: str
+    format: str
+    filename: str | None = None
+    size: int | None = None
+    sha256: str | None = None
+    source_sha256: str | None = None
+    epoch: int | None = None
+    status: str | None = None
+    verify_error: str | None = None
+    license: dict[str, Any] = field(default_factory=dict)
+    credit: str | None = None
+    model_info: dict[str, Any] = field(default_factory=dict)
+    parity: dict[str, Any] = field(default_factory=dict)
+    added_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @property
+    def downloadable(self) -> bool:
+        """Whether Visin will send this model's file: verified, and shared under a stated licence."""
+        return self.status == "ready" and bool(self.license)
+
+    @property
+    def refusal(self) -> str | None:
+        """Why the file cannot be downloaded, or ``None`` when it can."""
+        if self.status == "failed":
+            return f"failed verification: {self.verify_error or 'unknown reason'}"
+        if self.status != "ready":
+            return "still being verified"
+        if not self.license:
+            return "no licence is stated for it"
+        return None
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any], *, training_id: str = "") -> StoredModel:
+        """The StoredModel the server described in ``data``."""
+        size, epoch = data.get("size"), data.get("epoch")
+        return cls(
+            id=str(_pick(data, "_id", "id") or ""),
+            training_id=training_id,
+            format=str(data.get("format") or ""),
+            filename=_str(data.get("filename")),
+            size=int(size) if isinstance(size, (int, float)) and not isinstance(size, bool) else None,
+            sha256=_str(data.get("sha256")),
+            source_sha256=_str(data.get("sourceSha256")),
+            epoch=int(epoch) if isinstance(epoch, (int, float)) and not isinstance(epoch, bool) else None,
+            status=_str(data.get("status")),
+            verify_error=_str(data.get("verifyError")),
+            license=_dict(data.get("license")),
+            credit=_str(data.get("credit")),
+            model_info=_dict(data.get("modelInfo")),
+            parity=_dict(data.get("parity")),
+            added_at=_str(data.get("addedAt")),
+            raw=dict(data),
+        )
+
+
+@dataclass(frozen=True)
 class Training:
     """A run. ``uuid`` is the one you chose; ``id`` is the database's."""
 
@@ -163,6 +230,16 @@ class Training:
     provenance: dict[str, Any] = field(default_factory=dict)
     notes: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @property
+    def stored_models(self) -> tuple[StoredModel, ...]:
+        """The checkpoints this run kept on Visin (:meth:`Run.save_model`), as opposed to pointers to the
+        Hub."""
+        return tuple(
+            StoredModel.from_json(model, training_id=self.id)
+            for model in self.models
+            if model.get("provider") == VISIN
+        )
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> Training:

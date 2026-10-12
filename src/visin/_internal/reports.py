@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Any
 from urllib.parse import quote
 
 from ..errors import ApiError, ConfigurationError, VisinError
+from .providers import VISIN
 from .transport import HttpClient
 
 logger = logging.getLogger("visin")
@@ -37,6 +39,7 @@ KINDS = frozenset(
         "visualization",
         "update",
         "model",
+        "model_file",
         "evaluation",
     }
 )
@@ -117,6 +120,8 @@ def deliver(client: HttpClient, op: dict[str, Any], context: DeliveryContext) ->
         return client.request(
             "POST", f"/trainings/{ident}/models", json=body, idempotent=True, retries=context.retries
         )
+    if kind == "model_file":
+        return _model_file(client, op, body, context)
     if kind == "update":
         ident = training_id(client, context, op["training_uuid"])
         return client.request("PUT", f"/trainings/{ident}", json=body, retries=context.retries)
@@ -316,6 +321,85 @@ def _visualization(
     return _post_once(client, "/visualizations", record, context)
 
 
+def _already_kept(
+    client: HttpClient, context: DeliveryContext, ident: str, body: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The model Visin already holds for this exact file, when an earlier delivery got it all the way there.
+
+    A replay (``visin sync``, or a resumed run publishing its best checkpoint again) must not send gigabytes
+    the server has, and then be refused for claiming a slot already taken. A model counts once Visin has read
+    it and found this digest, in this format and at this epoch. Asking is a courtesy: when it cannot be
+    answered, the upload goes ahead.
+    """
+    digest = body.get("sha256")
+    if not digest:
+        return None
+    try:
+        run = client.request("GET", f"/trainings/{ident}", retries=context.retries) or {}
+    except VisinError:
+        return None
+    for model in run.get("models") or ():
+        if (
+            isinstance(model, dict)
+            and model.get("provider") == VISIN
+            and model.get("status") == "ready"
+            and model.get("format") == body["format"]
+            and model.get("sha256") == digest
+            and model.get("epoch") == body.get("epoch")
+        ):
+            return model
+    return None
+
+
+def _model_file(
+    client: HttpClient, op: dict[str, Any], body: dict[str, Any], context: DeliveryContext
+) -> Any:
+    """Keep a checkpoint on Visin: reserve a place for it, send the bytes, then claim them for the run.
+
+    A transient failure keeps the reservation and completed-upload marker in the op, so a spool retry
+    resumes the same upload or repeats only its claim. An expired unfinished upload gets a new reservation.
+    A claim whose answer was lost repeats the same file identity, never creating a conflicting epoch slot.
+    """
+    path = staged_path(op, context)
+    if not path.exists():
+        raise ConfigurationError(f"the file for model {body.get('format')!r} is gone: {path}")
+    ident = training_id(client, context, op["training_uuid"])
+    grant = op.get("upload")
+    if grant is None:
+        kept = _already_kept(client, context, ident, body)
+        if kept is not None:
+            return kept
+    if not isinstance(grant, dict) or (not op.get("uploaded") and grant.get("expiresAt", 0) <= time.time()):
+        grant = client.request(
+            "POST",
+            f"/trainings/{ident}/models/upload-url",
+            json={"format": body["format"], "size": os.path.getsize(path)},
+            idempotent=True,
+            retries=context.retries,
+        )
+        try:
+            grant = {
+                "uploadUrl": grant["uploadUrl"],
+                "fileId": grant["fileId"],
+                "expiresAt": time.time() + grant.get("expiresInMinutes", 240) * 60,
+            }
+        except (KeyError, TypeError) as exc:
+            raise ApiError(f"upload-url answered without {exc}", status=None) from exc
+        op["upload"] = grant
+        op.pop("uploaded", None)
+    upload_url, file_id = grant["uploadUrl"], grant["fileId"]
+    if not op.get("uploaded"):
+        client.put_file_chunked(upload_url, str(path), "application/octet-stream", retries=context.retries)
+        op["uploaded"] = True
+    claim: dict[str, Any] = {"provider": VISIN, "kind": "model", "fileId": file_id, "format": body["format"]}
+    for key in ("epoch", "license", "credit", "sha256", "sourceSha256", "modelInfo", "parity"):
+        if body.get(key) is not None:
+            claim[key] = body[key]
+    return client.request(
+        "POST", f"/trainings/{ident}/models", json=claim, idempotent=True, retries=context.retries
+    )
+
+
 def staged_path(op: dict[str, Any], context: DeliveryContext) -> Path:
     """Where the file an op uploads lives: its staged copy, or the original."""
     staged = op.get("staged")
@@ -326,7 +410,7 @@ def staged_path(op: dict[str, Any], context: DeliveryContext) -> Path:
 
 def discard_staged(op: dict[str, Any], context: DeliveryContext) -> None:
     """Remove an op's staged copy once nothing will need it again."""
-    if op.get("op") != "visualization" or not op.get("staged") or context.files is None:
+    if op.get("op") not in ("visualization", "model_file") or not op.get("staged") or context.files is None:
         return
     try:
         (context.files / op["staged"]).unlink()

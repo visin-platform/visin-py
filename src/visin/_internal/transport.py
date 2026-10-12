@@ -9,11 +9,16 @@ copied-around integrations spent most of their length.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import io
 import json as jsonlib
 import logging
 import os
 import platform
 import random
+import re
 import time
 from collections.abc import Mapping
 from typing import Any, Callable, Tuple, Union
@@ -38,6 +43,12 @@ UPLOAD_TIMEOUT: Timeout = (5.0, 300.0)
 # A download's read deadline applies to each chunk, not the whole body.
 DOWNLOAD_TIMEOUT: Timeout = (5.0, 60.0)
 DOWNLOAD_CHUNK = 8 * 2**20
+# How much of a file is read at a time to hash it, so a checkpoint never has to fit in memory.
+HASH_BLOCK = 8 * 2**20
+# A proxy in front of Visin commonly limits one request body to about 100 MB, so a large file goes up in
+# pieces
+# well under it: the same size the web app uses.
+UPLOAD_CHUNK = 64 * 2**20
 
 # What Visin documents as worth retrying: the rate limit, and a gateway or
 # service that did not answer in time. A 500 is not on the list; repeating it
@@ -100,6 +111,41 @@ def _retry_after(response: requests.Response) -> float | None:
         return max(0.0, float(raw))
     except ValueError:  # an HTTP date; the backoff will do
         return None
+
+
+def file_sha256(path: str) -> str:
+    """The SHA-256 of a file, read in pieces so a checkpoint does not have to fit in memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for piece in iter(lambda: handle.read(HASH_BLOCK), b""):
+            digest.update(piece)
+    return digest.hexdigest()
+
+
+def _representation_digest(response: Any) -> str | None:
+    """A whole-file SHA-256 from Repr-Digest, even for a partial response."""
+    header = getattr(response, "headers", {}).get("Repr-Digest", "")
+    match = re.search(r"(?:^|,)\s*sha-256\s*=\s*:([^:]*):", header)
+    if not match:
+        if "sha-256" in header:
+            raise TransportError("the response has an invalid Repr-Digest SHA-256")
+        return None
+    try:
+        digest = base64.b64decode(match[1], validate=True)
+    except binascii.Error as exc:
+        raise TransportError("the response has an invalid Repr-Digest SHA-256") from exc
+    if len(digest) != 32:
+        raise TransportError("the response has an invalid Repr-Digest SHA-256")
+    return digest.hex()
+
+
+def _stored_size(response: Any) -> int | None:
+    """The bytes file-service says it holds, from its reply to a piece, when it says."""
+    try:
+        size = response.json().get("size")
+    except (ValueError, AttributeError):
+        return None
+    return size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None
 
 
 class HttpClient:
@@ -310,6 +356,97 @@ class HttpClient:
                 )
             return
 
+    def put_file_chunked(
+        self,
+        url: str,
+        path: str,
+        content_type: str,
+        *,
+        chunk_bytes: int = UPLOAD_CHUNK,
+        progress: Callable[[int, int], None] | None = None,
+        retries: int | None = None,
+    ) -> None:
+        """PUT a file at a signed URL in ``Content-Range`` pieces, resuming where the server says it is.
+
+        A file of ``chunk_bytes`` or less is one request, as :meth:`put_file`. A larger one goes up a
+        piece at a
+        time, which is what gets it past a proxy's request-size limit and what makes it resumable: a
+        piece that
+        dies is sent again on its own, and when the server turns out to hold a different amount than assumed
+        (answering 409 with the bytes it has) the upload continues from there rather than starting over.
+        ``progress(done, total)`` is called as pieces land. The failures tolerated in a row are the client's
+        retry budget; any piece that lands resets the count.
+        """
+        if chunk_bytes < 1:
+            raise ValueError("chunk_bytes must be positive")
+        total = os.path.getsize(path)
+        if total <= chunk_bytes:
+            self.put_file(url, path, content_type, retries=retries)
+            if progress is not None:
+                progress(total, total)
+            return
+        budget = self.retries if retries is None else retries
+        offset = 0
+        failures = 0
+        with open(path, "rb") as handle:
+            while offset < total:
+                end = min(offset + chunk_bytes, total)
+                handle.seek(offset)
+                piece = handle.read(end - offset)
+                headers = {"Content-Type": content_type, "Content-Range": f"bytes {offset}-{end - 1}/{total}"}
+                try:
+                    response = self._uploads.put(
+                        url,
+                        data=io.BytesIO(piece),
+                        headers=headers,
+                        timeout=UPLOAD_TIMEOUT,
+                        verify=self.verify,
+                    )
+                except _RETRYABLE_EXCEPTIONS as exc:
+                    if failures < budget and not isinstance(exc, requests.exceptions.SSLError):
+                        self._pause(failures, None, f"upload at byte {offset}: {exc}")
+                        failures += 1
+                        continue
+                    raise TransportError(f"upload to signed URL failed: {exc}") from exc
+                except requests.exceptions.RequestException as exc:
+                    raise TransportError(f"upload to signed URL failed: {exc}") from exc
+
+                status = response.status_code
+                stored = _stored_size(response)
+                if stored is not None and stored > total:
+                    raise TransportError(f"the server reports {stored} bytes for an upload of {total}")
+                if status == 409 and stored is not None and stored != offset:
+                    failures += 1
+                    if failures > budget:
+                        raise TransportError(
+                            "upload could not resynchronise with the server "
+                            f"(it holds {stored} of {total} bytes)"
+                        )
+                    offset = min(stored, total)
+                    continue
+                if 200 <= status < 300:
+                    landed = stored if stored is not None else end
+                    if landed <= offset:
+                        failures += 1
+                        if failures > budget:
+                            raise TransportError(f"upload made no progress past byte {offset} of {total}")
+                        continue
+                    offset = min(landed, total)
+                    failures = 0
+                    if progress is not None:
+                        progress(offset, total)
+                    continue
+                retryable = status in RETRY_STATUSES or status >= 500 or status == 409
+                if retryable and failures < budget:
+                    self._pause(failures, _retry_after(response), f"upload answered {status}")
+                    failures += 1
+                    continue
+                raise ApiError(
+                    f"upload returned {status}: {(response.text or '')[:300]}",
+                    status=status,
+                    body=(response.text or "")[:500],
+                )
+
     # ------------------------------------------------------------------ downloads
 
     def download_file(
@@ -318,15 +455,22 @@ class HttpClient:
         path: str,
         *,
         size: int | None = None,
+        sha256: str | None = None,
+        authenticated: bool = False,
         progress: Callable[[int, int | None], None] | None = None,
         retries: int | None = None,
     ) -> None:
-        """GET a signed URL into ``path``, resuming a partial download.
+        """GET a URL into ``path``, resuming a partial download.
 
         The body is written to ``path + ".part"`` and renamed to ``path`` only
         once complete, and with ``size``, only at that length: an interrupted
         download leaves the part to resume from, never a truncated file that
-        looks finished. ``progress(done, total)`` is called as bytes arrive.
+        looks finished. With ``sha256`` the finished file must also have that
+        digest; a file that does not is deleted and refused. ``progress(done,
+        total)`` is called as bytes arrive.
+
+        A signed URL is its own credential. With ``authenticated`` the request is
+        made as this client, for an address on Visin's own API that needs one.
         """
         budget = self.retries if retries is None else retries
         part = path + ".part"
@@ -337,9 +481,21 @@ class HttpClient:
                 break
             headers = {"Range": f"bytes={done}-"} if done else {}
             try:
-                with self._uploads.get(
-                    url, headers=headers, stream=True, timeout=DOWNLOAD_TIMEOUT, verify=self.verify
-                ) as response:
+                if authenticated:
+                    # The session's JSON `Accept` would have a file server answer 406.
+                    opened = self.session.request(
+                        "GET",
+                        url,
+                        headers={**headers, "Accept": "*/*"},
+                        stream=True,
+                        timeout=DOWNLOAD_TIMEOUT,
+                        verify=self.verify,
+                    )
+                else:
+                    opened = self._uploads.get(
+                        url, headers=headers, stream=True, timeout=DOWNLOAD_TIMEOUT, verify=self.verify
+                    )
+                with opened as response:
                     status = response.status_code
                     if status in RETRY_STATUSES and attempt < budget:
                         self._pause(attempt, _retry_after(response), f"download answered {status}")
@@ -353,6 +509,11 @@ class HttpClient:
                             status=status,
                             body=(response.text or "")[:500],
                         )
+                    declared = _representation_digest(response)
+                    if declared:
+                        if sha256 and declared != sha256.lower():
+                            raise TransportError("Repr-Digest does not match the model's recorded SHA-256")
+                        sha256 = declared
                     # 200 to a range request: the server sent the whole body again
                     mode = "ab" if done and status == 206 else "wb"
                     done = done if mode == "ab" else 0
@@ -381,6 +542,14 @@ class HttpClient:
         got = os.path.getsize(part) if os.path.exists(part) else 0
         if size is not None and got != size:
             raise TransportError(f"downloaded {got} of {size} bytes; run again to resume")
+        if sha256 is not None:
+            digest = file_sha256(part)
+            if digest != sha256.lower():
+                os.unlink(part)
+                raise TransportError(
+                    f"the downloaded file's SHA-256 is {digest}, not the {sha256} Visin recorded; "
+                    "it was deleted"
+                )
         os.replace(part, path)
 
     def close(self) -> None:
