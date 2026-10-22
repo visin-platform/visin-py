@@ -10,13 +10,20 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-22
+
+### Added
+
+- read and download model outputs from the JSON endpoint
+
+[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/visin-platform/visin-py/compare/v0.9.0...v0.10.0
 ## [0.9.0] - 2026-10-12
 
 ### Added
 
 - keep model checkpoints on Visin with chunked, resumable upload and download
 
-[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/visin-platform/visin-py/compare/v0.8.0...v0.9.0
 ## [0.8.0] - 2026-10-04
 
