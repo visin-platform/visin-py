@@ -216,8 +216,9 @@ models/run-epoch99.onnx
 Downloads a checkpoint and prints where it went. The file is checked against the SHA-256 Visin recorded, an
 interrupted download resumes where it stopped, and a file that does not match is deleted. A run with one model
 needs no more than its UUID; with several, say which with `--model ID` (from `visin models`) or `--format`.
-`--outputs` downloads instead the zip of what the model produced on the frames its run was evaluated on:
-predictions, confidence, the checkpoint's results and a manifest naming the model, dataset and licence.
+`--outputs` downloads instead what the model produced, into a folder `<model>-outputs`: `outputs.json`, naming
+the model, its licence, the data and the checkpoint's results, and the frames in `mask/`, `segment/` and
+`confidence/`.
 
 ## visin datasets
 

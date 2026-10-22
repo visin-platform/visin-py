@@ -72,11 +72,11 @@ Visin does not know whether a result is better high or low unless the project sa
 config = api.config(run)  # the dict logged with log_config, or None
 config.config["lr"]
 
-for frame in api.visualizations(run, kind="overlay"):  # newest first, each with a signed link
+for frame in api.visualizations(run, kind="overlay", epoch=99):  # newest first, each with a signed link
     api.download_visualization(frame, "frames/")  # saved under its file name
 ```
 
-Signed links expire, so download soon after listing.
+`kind` and `epoch` are optional filters. Signed links expire an hour after listing, so download soon after.
 
 ## As a DataFrame
 
@@ -106,12 +106,18 @@ for model in run.stored_models:  # or api.models(run)
     print(model.format, model.size, model.status, model.license.get("id"))
 
 path = api.download_model(run, file_format="onnx", directory="models/")
-zip_path = api.download_model(run, file_format="pth", directory="models/", outputs=True)
+outputs = api.model_outputs(run, file_format="pth")
+print(outputs.epoch, outputs.totals)  # e.g. 99 {'mask': 120, 'segment': 120, 'confidence': 120}
+folder = api.download_model(run, file_format="pth", directory="models/", outputs=True)
 ```
 
 `stored_models` are the checkpoints saved with `Run.save_model`; a model the run only links on the Hub is in
 `run.models`. `download_model` checks the file against its recorded SHA-256, resumes an interrupted
-download, and refuses a model that is not offered (`model.refusal` says why). `trainings(dataset=...)` finds
+download, and refuses a model that is not offered (`model.refusal` says why). `model_outputs` describes what the
+model produced on its run's frames: the checkpoint and its licence, the data it was trained and run on, how to read
+each kind of output, and the epoch's results (all of it in `outputs.raw`). With `outputs=True`, `download_model`
+saves that answer as `outputs.json` beside the frames of the model's epoch, in `mask/`, `segment/` and
+`confidence/`, and its `progress` counts frames. `trainings(dataset=...)` finds
 the runs trained on a dataset, so `for run in api.trainings(dataset=dataset_id): run.stored_models` lists
 what came out of it.
 

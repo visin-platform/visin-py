@@ -257,7 +257,16 @@ def recorded(server, session, uploads, tmp_path, monkeypatch, hf):
     }
     session.route("GET", "/trainings/uuid/kept-run", ok(kept), ok(kept), ok(kept))
     session.route("GET", "/models/0123456789abcdef01234560/file", FakeStream(200, weights))
-    session.route("GET", "/models/0123456789abcdef01234560/bundle", FakeStream(200, b"PK zip"))
+    session.route(
+        "GET",
+        "/models/0123456789abcdef01234560/outputs",
+        ok(
+            {
+                "run": {"uuid": "kept-run", "epoch": 1, "epochUuid": "e1"},
+                "folders": {"mask": "Class indices."},
+            }
+        ),
+    )
     api.models("kept-run")
     api.download_model("kept-run", directory=tmp_path / "downloaded")
     api.download_model("kept-run", directory=tmp_path / "downloaded", outputs=True)
@@ -303,7 +312,7 @@ def test_the_stored_model_requests_are_among_those_checked(recorded):
     assert claims[0]["license"] == {"id": "cc-by-4.0"} and claims[1]["sourceSha256"] == claims[0]["sha256"]
     downloads = [path for method, path, _ in sent if method == "GET" and "/models/" in path]
     assert any(path.endswith("/file") for path in downloads) and any(
-        path.endswith("/bundle") for path in downloads
+        path.endswith("/outputs") for path in downloads
     )
 
 

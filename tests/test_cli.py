@@ -1078,9 +1078,11 @@ def test_download_model_refuses_what_is_not_offered(server, session, capsys, tmp
     assert "still being verified" in capsys.readouterr().err or True
 
 
-def test_download_model_can_fetch_the_outputs_zip(server, session, capsys, tmp_path):
+def test_download_model_can_fetch_what_the_model_produced(server, session, capsys, tmp_path):
     run, _ = stored_run_with()
     session.route("GET", "/trainings/uuid/u1", run)
-    session.route("GET", "/trainings/t1/models/m1/bundle", FakeStream(200, b"PK zip"))
+    outputs = {"run": {"id": "t1", "uuid": "u1", "epoch": 99, "epochUuid": "e99"}, "model": {"id": "m1"}}
+    session.route("GET", "/trainings/t1/models/m1/outputs", ok(outputs))
     code, out = run_cli(capsys, "download-model", "u1", "--dir", str(tmp_path), "--outputs")
-    assert code == 0 and out.strip().endswith("run-epoch99-outputs.zip")
+    assert code == 0 and out.strip().endswith("run-epoch99-outputs")
+    assert (tmp_path / "run-epoch99-outputs" / "outputs.json").exists()

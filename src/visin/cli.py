@@ -1036,7 +1036,7 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_model.add_argument(
         "--outputs",
         action="store_true",
-        help="download instead the zip of what the model produced (predictions, confidence, results)",
+        help="download instead what the model produced: outputs.json and its frames, in a folder",
     )
     fetch_model.set_defaults(handler=cmd_download_model)
 

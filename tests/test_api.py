@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 import pytest
 from fakes import FakeStream, ok
@@ -854,8 +855,98 @@ def test_a_given_model_object_is_used_as_it_is(api, session, tmp_path):
     assert api.download_model("run-1", model, tmp_path).read_bytes() == WEIGHTS
 
 
-def test_the_outputs_of_a_model_come_as_one_zip(api, session, tmp_path):
+OUTPUTS = {
+    "run": {"id": "t1", "uuid": "run-1", "name": "run", "epoch": 99, "epochUuid": "e99"},
+    "model": {"id": "m1", "format": "pth", "filename": "run-epoch99.pth"},
+    "folders": {"mask": "Class indices.", "segment": "Coloured."},
+    "totals": {"mask": 1, "segment": 0, "confidence": 0},
+    "files": [{"visualizationUuid": "v1", "folder": "mask", "frame": "f1", "filename": "f1.png"}],
+    "truncated": False,
+}
+
+
+def test_what_a_model_produced_is_read_as_one_answer(api, session):
     session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1")))
-    session.route("GET", "/trainings/t1/models/m1/bundle", FakeStream(200, b"PK zip bytes"))
-    path = api.download_model("run-1", directory=tmp_path, outputs=True)
-    assert path.name == "run-epoch99-outputs.zip" and path.read_bytes() == b"PK zip bytes"
+    session.route("GET", "/trainings/t1/models/m1/outputs", ok(OUTPUTS))
+    outputs = api.model_outputs("run-1")
+    assert (outputs.model_id, outputs.training_uuid, outputs.epoch, outputs.epoch_uuid) == (
+        "m1",
+        "run-1",
+        99,
+        "e99",
+    )
+    assert outputs.totals == {"mask": 1, "segment": 0, "confidence": 0} and not outputs.truncated
+    assert outputs.raw["files"][0]["frame"] == "f1"
+
+
+def test_the_outputs_of_a_model_not_offered_are_refused(api, session):
+    session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1", status="verifying")))
+    with pytest.raises(VisinError, match="cannot be read: still being verified"):
+        api.model_outputs("run-1")
+
+
+def frame(uuid, name="f1.png", kind="mask", epoch_uuid="e99", url=True):
+    return {
+        "visualization_uuid": uuid,
+        "epoch_uuid": epoch_uuid,
+        "type": kind,
+        "filename": name,
+        **({"signedUrl": f"https://files.example.test/{uuid}"} if url else {}),
+    }
+
+
+def test_the_outputs_of_a_model_are_saved_as_json_beside_its_epochs_frames(api, session, uploads, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1")))
+    session.route("GET", "/trainings/t1/models/m1/outputs", ok(OUTPUTS))
+    frames = [frame("v1"), frame("v0", "f0.png", epoch_uuid="e98")]
+    session.route("GET", "/visualizations/training/run-1", page("visualizations", frames, 1, 1))
+    uploads.files["https://files.example.test/v1"] = b"\x89PNG"
+    counted = []
+    folder = api.download_model(
+        "run-1", directory=tmp_path, outputs=True, progress=lambda done, total: counted.append((done, total))
+    )
+    assert folder == tmp_path / "run-epoch99-outputs"
+    assert json.loads((folder / "outputs.json").read_text())["run"]["epochUuid"] == "e99"
+    assert (folder / "mask" / "f1.png").read_bytes() == b"\x89PNG"
+    assert not (folder / "mask" / "f0.png").exists() and not (folder / "segment").exists()
+    assert counted == [(1, 1)]
+    listed = [call["params"] for call in session.calls if "/visualizations/" in call["url"]]
+    assert [(params["type"], params["epoch"]) for params in listed] == [("mask", 99)]
+
+
+def test_two_outputs_with_one_name_are_both_kept(api, session, uploads, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1")))
+    session.route("GET", "/trainings/t1/models/m1/outputs", ok(OUTPUTS))
+    session.route(
+        "GET", "/visualizations/training/run-1", page("visualizations", [frame("v1"), frame("v2")], 1, 1)
+    )
+    uploads.files["https://files.example.test/v1"] = b"one"
+    uploads.files["https://files.example.test/v2"] = b"two"
+    folder = api.download_model("run-1", directory=tmp_path, outputs=True)
+    assert (folder / "mask" / "f1.png").read_bytes() == b"one"
+    assert (folder / "mask" / "f1-v2.png").read_bytes() == b"two"
+
+
+def test_outputs_with_a_frame_that_cannot_be_fetched_are_refused_before_anything_is_saved(
+    api, session, tmp_path
+):
+    session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1")))
+    session.route("GET", "/trainings/t1/models/m1/outputs", ok(OUTPUTS))
+    session.route(
+        "GET", "/visualizations/training/run-1", page("visualizations", [frame("v1", url=False)], 1, 1)
+    )
+    with pytest.raises(VisinError, match="1 frame"):
+        api.download_model("run-1", directory=tmp_path, outputs=True)
+    assert not (tmp_path / "run-epoch99-outputs").exists()
+
+
+def test_outputs_that_do_not_name_their_epoch_are_refused(api, session, tmp_path):
+    session.route("GET", "/trainings/uuid/run-1", stored_run(stored("m1")))
+    session.route("GET", "/trainings/t1/models/m1/outputs", ok({**OUTPUTS, "run": {"uuid": "run-1"}}))
+    with pytest.raises(VisinError, match="which run and epoch"):
+        api.download_model("run-1", directory=tmp_path, outputs=True)
+
+
+def test_frames_can_be_listed_for_one_epoch(api, session):
+    api.visualizations("run-1", epoch=3)
+    assert session.calls[0]["params"]["epoch"] == 3

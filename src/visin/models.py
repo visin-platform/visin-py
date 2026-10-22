@@ -208,6 +208,49 @@ class StoredModel:
 
 
 @dataclass(frozen=True)
+class ModelOutputs:
+    """What a stored model produced, and where it came from.
+
+    The outputs are the frames its run uploaded against the model's epoch, one folder per kind (``mask``,
+    ``segment``, ``confidence``); ``folders`` says how to read each and ``totals`` how many there are.
+    ``raw`` is the whole answer: the checkpoint and its licence, the data it was trained and run on, the
+    epoch's results and the tests of the checkpoint. ``raw["files"]`` lists the outputs, the first ones only
+    when ``truncated`` is true.
+    """
+
+    model_id: str
+    training_id: str
+    training_uuid: str
+    epoch: int | None = None
+    epoch_uuid: str | None = None
+    folders: dict[str, str] = field(default_factory=dict)
+    totals: dict[str, int] = field(default_factory=dict)
+    truncated: bool = False
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> ModelOutputs:
+        """The ModelOutputs the server described in ``data``."""
+        run, model = _dict(data.get("run")), _dict(data.get("model"))
+        epoch = run.get("epoch")
+        return cls(
+            model_id=str(model.get("id") or ""),
+            training_id=str(run.get("id") or ""),
+            training_uuid=str(run.get("uuid") or ""),
+            epoch=int(epoch) if isinstance(epoch, (int, float)) and not isinstance(epoch, bool) else None,
+            epoch_uuid=_str(run.get("epochUuid")),
+            folders={str(kind): str(text) for kind, text in _dict(data.get("folders")).items()},
+            totals={
+                str(kind): int(count)
+                for kind, count in _dict(data.get("totals")).items()
+                if isinstance(count, (int, float)) and not isinstance(count, bool)
+            },
+            truncated=data.get("truncated") is True,
+            raw=dict(data),
+        )
+
+
+@dataclass(frozen=True)
 class Training:
     """A run. ``uuid`` is the one you chose; ``id`` is the database's."""
 

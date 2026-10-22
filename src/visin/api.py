@@ -14,6 +14,7 @@ keys**); a pipeline key works too, for its one project.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import replace
@@ -34,6 +35,7 @@ from .models import (
     Finding,
     Leaderboard,
     LeaderboardEntry,
+    ModelOutputs,
     Project,
     StoredModel,
     Suite,
@@ -279,12 +281,15 @@ class Api:
         found = (self._get(f"/trainings/{quote(training.id, safe='')}/configs") or {}).get("configs") or []
         return Configuration.from_json(found[0]) if found else None
 
-    def visualizations(self, ref: str | Training, kind: str | None = None) -> list[Visualization]:
+    def visualizations(
+        self, ref: str | Training, kind: str | None = None, *, epoch: int | None = None
+    ) -> list[Visualization]:
         """The frames a run stored, newest first, each with a signed link to its file.
 
-        ``kind`` keeps one kind, as given to ``upload_visualization``.
+        ``kind`` keeps one kind, as given to ``upload_visualization``; ``epoch`` keeps one epoch's, by its
+        number. A signed link expires an hour after it was listed.
         """
-        params = {"type": kind, "includeUrls": "true"}
+        params = {"type": kind, "includeUrls": "true", "epoch": epoch}
         pages = self._pages(
             f"/visualizations/training/{quote(self._uuid(ref), safe='')}", "visualizations", params, 100
         )
@@ -348,26 +353,20 @@ class Api:
         one (narrow with ``file_format="onnx"``). The file is checked against the SHA-256 Visin recorded, an
         interrupted download resumes where it stopped, and a file that does not match is deleted and refused.
 
-        With ``outputs=True`` this saves instead the zip of what the model produced on the frames its run
-        was evaluated on: predictions, confidence, the checkpoint's results and a manifest. That zip is built
-        as it is sent, so it is fetched whole and not checked against a digest.
+        With ``outputs=True`` this saves instead what the model produced, in a folder ``<model>-outputs``:
+        ``outputs.json`` (the answer of :meth:`model_outputs`) and the frames of the model's epoch, one folder
+        per kind (``mask/``, ``segment/``, ``confidence/``). The weights are not in it, and the folder's path
+        is returned. Saving again into the same folder replaces the files of the same name and leaves the
+        rest. ``progress(done, total)`` then counts frames rather than bytes.
         """
         chosen = self._pick_model(ref, model, file_format)
         if chosen.refusal:
             raise VisinError(f"model {chosen.id} cannot be downloaded: {chosen.refusal}")
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        base = f"{chosen.training_id}/models/{quote(chosen.id, safe='')}"
         if outputs:
-            stem = Path(chosen.filename or f"model.{chosen.format}").stem
-            path = target / f"{stem}-outputs.zip"
-            self._client.download_file(
-                f"{self._client.base_url}/trainings/{base}/bundle",
-                str(path),
-                authenticated=True,
-                progress=progress,
-            )
-            return path
+            return self._download_outputs(chosen, target, progress)
+        base = f"{chosen.training_id}/models/{quote(chosen.id, safe='')}"
         path = target / Path(chosen.filename or f"model.{chosen.format}").name
         self._client.download_file(
             f"{self._client.base_url}/trainings/{base}/file",
@@ -378,6 +377,60 @@ class Api:
             progress=progress,
         )
         return path
+
+    def model_outputs(
+        self, ref: str | Training, model: str | StoredModel | None = None, *, file_format: str | None = None
+    ) -> ModelOutputs:
+        """What a stored model produced on its run's frames, and where the model and the frames came from.
+
+        ``model`` and ``file_format`` choose the model as :meth:`download_model` does. The frames themselves
+        are :meth:`visualizations` of the model's epoch; ``download_model(..., outputs=True)`` saves both.
+        """
+        chosen = self._pick_model(ref, model, file_format)
+        if chosen.refusal:
+            raise VisinError(f"model {chosen.id} cannot be read: {chosen.refusal}")
+        return self._outputs_of(chosen)
+
+    def _outputs_of(self, chosen: StoredModel) -> ModelOutputs:
+        path = f"/trainings/{quote(chosen.training_id, safe='')}/models/{quote(chosen.id, safe='')}/outputs"
+        return ModelOutputs.from_json(self._get(path) or {})
+
+    def _download_outputs(self, chosen: StoredModel, target: Path, progress: Any = None) -> Path:
+        """Save ``outputs.json`` and the frames of the model's epoch, by kind, and return their folder.
+
+        The frames are listed from the run, not taken from ``files``, which names only the first ones when
+        there are many. Two frames of one kind with the same file name (from two datasets) are both kept: the
+        second is saved with its visualization id added to the name.
+        """
+        answer = self._outputs_of(chosen)
+        if not answer.training_uuid or answer.epoch is None:
+            raise VisinError(f"Visin did not say which run and epoch model {chosen.id}'s outputs belong to")
+        frames = [
+            frame
+            for kind in answer.folders
+            if answer.totals.get(kind, 1) > 0
+            for frame in self.visualizations(answer.training_uuid, kind=kind, epoch=answer.epoch)
+            if frame.epoch_uuid == answer.epoch_uuid
+        ]
+        unlinked = [frame.uuid for frame in frames if not (frame.url and frame.filename)]
+        if unlinked:
+            raise VisinError(
+                f"{len(unlinked)} frame(s) of model {chosen.id} have no link to download from: {unlinked[0]}"
+            )
+        folder = target / f"{Path(chosen.filename or f'model.{chosen.format}').stem}-outputs"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "outputs.json").write_text(json.dumps(answer.raw, indent=2) + "\n", encoding="utf-8")
+        saved: set[Path] = set()
+        for done, frame in enumerate(frames, start=1):
+            path = folder / str(frame.kind) / Path(str(frame.filename)).name
+            if path in saved:
+                path = path.with_name(f"{path.stem}-{frame.uuid}{path.suffix}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._client.download_file(str(frame.url), str(path))
+            saved.add(path)
+            if progress is not None:
+                progress(done, len(frames))
+        return folder
 
     def epochs(self, ref: str | Training) -> list[Epoch]:
         """Every epoch of a run, in epoch order."""
