@@ -10,13 +10,20 @@ one, together with anything written by hand under Unreleased.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-18
+
+### Added
+
+- report inference runs sample by sample and compare judges
+
+[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/visin-platform/visin-py/compare/v0.10.0...v0.11.0
 ## [0.10.0] - 2026-10-22
 
 ### Added
 
 - read and download model outputs from the JSON endpoint
 
-[Unreleased]: https://github.com/visin-platform/visin-py/compare/v0.10.0...HEAD
 [0.10.0]: https://github.com/visin-platform/visin-py/compare/v0.9.0...v0.10.0
 ## [0.9.0] - 2026-10-12
 
