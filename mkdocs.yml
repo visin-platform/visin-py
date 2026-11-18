@@ -33,6 +33,7 @@ nav:
       - Recipes: guides/recipes.md
       - Keras, Lightning and Hugging Face: guides/frameworks.md
       - Evaluating and ranking models: guides/evaluation.md
+      - VLM judge runs: guides/vlm-judges.md
       - Reading runs back: guides/reading.md
       - Datasets: guides/datasets.md
       - The visin command: guides/cli.md

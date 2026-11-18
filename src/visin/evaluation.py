@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import uuid as uuidlib
 from collections.abc import Mapping
@@ -32,6 +33,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+import requests
 
 from ._internal import provenance as provenance_info
 from ._internal.config import Settings, read_settings
@@ -50,7 +53,9 @@ logger = logging.getLogger("visin")
 __all__ = [
     "evaluate",
     "hub_checkpoint",
+    "human_checkpoint",
     "local_checkpoint",
+    "ollama_checkpoint",
     "promote",
     "publish",
     "sha256_of",
@@ -71,6 +76,57 @@ def local_checkpoint(path: str | Path, label: str | None = None) -> dict[str, An
     """
     file = Path(path)
     return {"kind": "local", "sha256": sha256_of(file), "label": label or file.stem}
+
+
+def human_checkpoint(label: str) -> dict[str, Any]:
+    """Identify an annotator whose judgments are used as a reference."""
+    if not label.strip():
+        raise ValueError("human checkpoint needs a label")
+    return {"kind": "human", "label": label}
+
+
+def ollama_checkpoint(model: str, *, host: str | None = None) -> dict[str, Any]:
+    """Identify an installed Ollama model by its manifest digest and quantization.
+
+    The identity and quantization are read together from Ollama's model list, so a moving tag
+    is resolved to the manifest the server actually has. ``host`` defaults to ``OLLAMA_HOST``.
+    """
+    name = model.strip()
+    if not name:
+        raise ConfigurationError("an Ollama model name is required")
+    base = (host or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+    if "://" not in base:
+        base = "http://" + base
+    try:
+        response = requests.get(f"{base}/api/tags", timeout=(3, 10))
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise ConfigurationError(f"could not query Ollama models: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+        raise ConfigurationError("Ollama returned an invalid model list")
+    target = name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
+    for item in data["models"]:
+        if not isinstance(item, dict):
+            continue
+        found = item.get("name") or item.get("model")
+        if not isinstance(found, str):
+            continue
+        found = found if ":" in found.rsplit("/", 1)[-1] else found + ":latest"
+        if found != target:
+            continue
+        digest = item.get("digest")
+        details = item.get("details") or {}
+        quantization = details.get("quantization_level") if isinstance(details, dict) else None
+        if not isinstance(digest, str) or not re.fullmatch(r"(?:sha256:)?[a-fA-F0-9]{64}", digest):
+            raise ConfigurationError(f"Ollama did not provide a valid manifest digest for {name}")
+        if not isinstance(quantization, str) or not quantization.strip():
+            raise ConfigurationError(f"Ollama did not provide quantization for {name}")
+        label = f"{name} ({quantization.strip()})"
+        if len(label) > 200:
+            raise ConfigurationError("Ollama model label exceeds 200 characters")
+        return {"kind": "local", "sha256": digest.removeprefix("sha256:").lower(), "label": label}
+    raise ConfigurationError(f"Ollama model {name!r} is not installed")
 
 
 def hub_checkpoint(repo: str, commit: str, path: str | None = None) -> dict[str, Any]:
@@ -158,7 +214,7 @@ def _evaluation_id(evaluation: Evaluation | str) -> str:
 
 
 def evaluate(
-    results: Mapping[str, Any],
+    results: Mapping[str, Any] | None = None,
     *,
     suite: str | None,
     checkpoint: Mapping[str, Any] | None,
@@ -221,13 +277,20 @@ def evaluate(
 
     ``dry_run=True`` stores nothing and returns the verdict only (``stored=False``, no id). It needs a server.
     """
+    sample_run = results is None
+    if sample_run and (not run or not callable(getattr(run, "finish", None))):
+        raise ConfigurationError("a sample evaluation needs its inference run object")
+    if sample_run and dry_run:
+        raise ConfigurationError("sample evaluations require a completed run")
     settings = read_settings(url=url, token=token, project=project, directory=directory)
+    if sample_run and url is None and token is None and directory is None and getattr(run, "_settings", None):
+        settings = run._settings
     mode = settings.effective_mode
     if mode == "disabled" and not dry_run:
         logger.warning("visin: nothing is configured, so this evaluation was not recorded")
         return Evaluation(suite=suite, stored=False)
 
-    body: dict[str, Any] = {"status": status, "results": to_jsonable(dict(results))}
+    body: dict[str, Any] = {"status": status, "results": to_jsonable(dict(results or {}))}
     if suite:
         body["suite"] = suite
     if checkpoint:
@@ -260,20 +323,43 @@ def evaluate(
     body["uuid"] = uuid or str(uuidlib.uuid4())
     chosen = project or settings.project or _run_project(run)
 
+    if sample_run:
+        run.finish()
+        if run._sample_failure:
+            raise ConfigurationError("sample reporting failed; the inference run cannot be evaluated")
+        if not run._finish_flushed:
+            raise ConfigurationError("the run is still sending; wait before recording its evaluation")
+        spool = run._delivery.spool
+        if spool is not None and (mode == "offline" or spool.pending()):
+            if chosen:
+                body["projectId"] = chosen
+            spool.append(
+                {"op": "evaluation", "body": body, **({"protocol": unresolved} if unresolved else {})}
+            )
+            logger.info("visin: evaluation %s waits after its run in %s", body["uuid"], spool.path)
+            return Evaluation(
+                uuid=str(body["uuid"]),
+                suite=suite,
+                checkpoint=dict(checkpoint or {}),
+                stored=False,
+                queued=True,
+            )
+
     if mode == "offline":
-        if not chosen:
+        if not chosen and not sample_run:
             raise ConfigurationError("an evaluation needs a project: pass project= or set VISIN_PROJECT")
         return _keep(settings, {**body, "projectId": chosen}, "offline", unresolved)
 
     client = connect(settings, "record an evaluation")
     try:
         chosen = chosen or discover_project(client)
-        if not chosen:
+        if not chosen and not sample_run:
             raise ConfigurationError(
                 "an evaluation needs a project: pass project= or set VISIN_PROJECT "
                 "(a pipeline key is limited to one project and supplies it)"
             )
-        body["projectId"] = chosen
+        if chosen:
+            body["projectId"] = chosen
         if unresolved:
             try:
                 body["evidence"] = {

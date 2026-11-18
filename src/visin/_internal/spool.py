@@ -177,6 +177,7 @@ class SyncResult:
     rejected: list[str] = field(default_factory=list)
     remaining: int = 0
     kept_rejected: int = field(default=0, repr=False)
+    stopped: bool = field(default=False, repr=False)
 
     @property
     def complete(self) -> bool:
@@ -213,7 +214,7 @@ def sync_spool(
         for batch in batches:
             _sync_batch(client, batch, context, result, drop_rejected)
     except _Unreachable:
-        pass
+        result.stopped = True
     # What is left on disk, less what the server refused: those are counted
     # as rejected, and "remaining" means waiting on the server.
     result.remaining = max(spool.count() - result.kept_rejected, 0)
@@ -258,7 +259,10 @@ def _send_lines(
 ) -> bool:
     """Send one pass of a batch's lines. True if a refused report was kept."""
     kept = False
-    for index, line in pending:
+    position = 0
+    while position < len(pending):
+        index, line = pending[position]
+        position += 1
         if index in done or not line.strip():
             continue
         try:
@@ -271,6 +275,48 @@ def _send_lines(
             result.rejected.append(f"line {index + 1} of {batch.name}: {exc}")
             _mark_done(batch, index)
             continue
+        indices = [index]
+        if op["op"] == "samples":
+            body = op.get("body")
+            rows = body.get("samples") if isinstance(body, dict) else None
+            if (
+                isinstance(rows, list)
+                and rows
+                and all(isinstance(row, dict) and isinstance(row.get("id"), str) for row in rows)
+                and len({row["id"] for row in rows}) == len(rows)
+            ):
+                ids = {row["id"] for row in rows}
+                while position < len(pending):
+                    next_index, next_line = pending[position]
+                    if next_index in done or not next_line.strip():
+                        break
+                    try:
+                        following = json.loads(next_line)
+                    except ValueError:
+                        break
+                    if (
+                        not isinstance(following, dict)
+                        or following.get("op") != "samples"
+                        or following.get("training_uuid") != op.get("training_uuid")
+                    ):
+                        break
+                    following_body = following.get("body")
+                    more = following_body.get("samples") if isinstance(following_body, dict) else None
+                    if (
+                        not isinstance(more, list)
+                        or not more
+                        or len(rows) + len(more) > 2000
+                        or not all(isinstance(row, dict) and isinstance(row.get("id"), str) for row in more)
+                    ):
+                        break
+                    more_ids = {row["id"] for row in more}
+                    if len(more_ids) != len(more) or ids.intersection(more_ids):
+                        break
+                    rows = [*rows, *more]
+                    ids.update(more_ids)
+                    indices.append(next_index)
+                    position += 1
+                op = {**op, "body": {**op["body"], "samples": rows}}
         try:
             deliver(client, op, context)
         except VisinError as exc:
@@ -278,6 +324,10 @@ def _send_lines(
                 logger.info("visin: server unreachable, stopping sync: %s", exc)
                 raise _Unreachable() from exc
             result.rejected.append(f"{op['op']}: {exc}")
+            if op["op"] == "samples":
+                # A completion or evaluation following this batch would freeze an incomplete run.
+                result.kept_rejected += len(indices)
+                raise _Unreachable() from exc
             if drop_rejected:
                 _mark_done(batch, index)
                 discard_staged(op, context)
@@ -289,9 +339,10 @@ def _send_lines(
                 # names a run the server does not have.
                 raise _Unreachable() from exc
             continue
-        _mark_done(batch, index)
+        for sent_index in indices:
+            _mark_done(batch, sent_index)
         discard_staged(op, context)
-        result.sent += 1
+        result.sent += len(indices)
     return kept
 
 

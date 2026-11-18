@@ -18,7 +18,17 @@ from .api import Api, flatten
 from .compare import Change, Diff, diff_evaluations
 from .datasets import CachedDataset, Datasets, cached_datasets, remove_cached
 from .errors import ApiError, ConfigurationError, SyncInProgressError, TransportError, VisinError
-from .evaluation import evaluate, hub_checkpoint, local_checkpoint, promote, publish, sha256_of, withdraw
+from .evaluation import (
+    evaluate,
+    hub_checkpoint,
+    human_checkpoint,
+    local_checkpoint,
+    ollama_checkpoint,
+    promote,
+    publish,
+    sha256_of,
+    withdraw,
+)
 from .models import (
     Benchmark,
     Comparison,
@@ -100,6 +110,7 @@ __all__ = [
     "flatten",
     "get_run",
     "hub_checkpoint",
+    "human_checkpoint",
     "init",
     "load_suite",
     "local_checkpoint",
@@ -109,6 +120,7 @@ __all__ = [
     "log_model",
     "log_test_results",
     "manifest_digest",
+    "ollama_checkpoint",
     "pending",
     "promote",
     "publish",

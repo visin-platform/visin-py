@@ -53,6 +53,7 @@ class Delivery:
         self._next_catch_up = 0.0
         self._warned_repeat = False
         self._delivered_epochs: set[str] = set()
+        self.durable = False
 
     def heartbeat(self) -> None:
         """Send current liveness without replaying it later or delaying the training loop."""
@@ -109,6 +110,11 @@ class Delivery:
         queue is full, so the op was discarded. Raises ``OSError`` when an offline
         run cannot write to disk.
         """
+        if self.durable and self.client is not None and self.spool is not None:
+            self.spool.append(op)
+            assert self.sender is not None
+            self.sender.submit(self._send_durable)
+            return True
         if self.client is not None:
             assert self.sender is not None
             # A partial, not a lambda: a stop that cannot wait hands queued work
@@ -122,6 +128,16 @@ class Delivery:
             return False
         return True
 
+    def _send_durable(self) -> None:
+        """Batch pending inference reports after a short, background-only collection window."""
+        if self.spool is None or not self.spool.pending():
+            return
+        if self.spooling and time.monotonic() < self._next_catch_up:
+            return
+        time.sleep(0.1)
+        self.spooling = True
+        self.catch_up(force=True)
+
     def _send(self, op: dict[str, Any]) -> None:
         """Deliver one op. Runs on the sender thread."""
         assert self.client is not None
@@ -131,6 +147,13 @@ class Delivery:
         try:
             deliver(self.client, op, self.context)
         except VisinError as exc:
+            if op.get("op") == "samples" and self.spool is not None:
+                self.keep(op)
+                self.start_spooling()
+                logger.warning(
+                    "visin: sample batch was not accepted; it and later reports remain on disk: %s", exc
+                )
+                return
             if op.get("_retained_upload"):
                 return
             if self.spool is not None and worth_retrying_later(exc):
@@ -186,12 +209,14 @@ class Delivery:
         self.sent += result.sent
         for message in result.rejected:
             logger.warning("visin: Visin refused a kept report: %s", message)
-        if result.remaining == 0:
+        if result.remaining == 0 and self.spool.count() == 0:
             if self.spooling:
                 logger.info("visin: Visin answers again; sent %d kept reports", result.sent)
             self.spooling = False
             return True
-        self._next_catch_up = time.monotonic() + CATCH_UP_INTERVAL
+        self._next_catch_up = time.monotonic() + (
+            CATCH_UP_INTERVAL if result.stopped or not self.durable else 0
+        )
         return False
 
     def flush(self, timeout: float) -> bool:

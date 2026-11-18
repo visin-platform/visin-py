@@ -41,6 +41,7 @@ KINDS = frozenset(
         "model",
         "model_file",
         "evaluation",
+        "samples",
     }
 )
 
@@ -122,6 +123,11 @@ def deliver(client: HttpClient, op: dict[str, Any], context: DeliveryContext) ->
         )
     if kind == "model_file":
         return _model_file(client, op, body, context)
+    if kind == "samples":
+        ident = training_id(client, context, op["training_uuid"])
+        return client.request(
+            "POST", f"/trainings/{ident}/samples", json=body, idempotent=True, retries=context.retries
+        )
     if kind == "update":
         ident = training_id(client, context, op["training_uuid"])
         return client.request("PUT", f"/trainings/{ident}", json=body, retries=context.retries)
@@ -223,6 +229,23 @@ def _create_run(client: HttpClient, body: dict[str, Any], context: DeliveryConte
         # Created by an earlier attempt, or by whatever launched this process.
         context.existing.add(uuid)
         training = client.request("GET", f"/trainings/uuid/{quote(uuid, safe='')}", retries=context.retries)
+        if body.get("kind") == "inference":
+            existing = training or {}
+            suite = existing.get("suite") or {}
+            requested = body.get("suite") or {}
+            if existing.get("kind") != "inference" or any(
+                suite.get(key) != requested.get(key) for key in ("slug", "version")
+            ):
+                raise ApiError("existing run has a different kind or suite", status=409) from exc
+            if existing.get("status") == "completed":
+                raise ApiError("completed inference run cannot be resumed", status=409) from exc
+            if existing.get("status") != "running":
+                ident = existing.get("_id")
+                if not ident:
+                    raise ApiError("existing inference run has no id", status=409) from exc
+                client.request(
+                    "PUT", f"/trainings/{ident}", json={"status": "running"}, retries=context.retries
+                )
     ident = (training or {}).get("_id")
     if ident:
         context.training_ids[uuid] = str(ident)

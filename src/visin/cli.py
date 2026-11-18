@@ -55,7 +55,7 @@ from .evaluation import evaluate, hub_checkpoint, local_checkpoint, promote, pub
 from .models import Evaluation, Leaderboard, Pagination
 from .offline import sync
 from .run import epoch_uuid_for
-from .suites import check_protocol, load_suite, manifest_digest, push_suite, read_split
+from .suites import check_protocol, load_suite, manifest_digest, parse_suite_ref, push_suite, read_split
 
 
 def _credential_kind(token: str | None) -> str:
@@ -115,6 +115,95 @@ class _Printer:
 
     def info(self, text: str) -> None:
         print(f"        {text}")
+
+
+def cmd_compare_judges(args: argparse.Namespace) -> int:
+    """Display a sample comparison only when it belongs to the named suite."""
+    from ._internal.connect import connect
+
+    try:
+        slug, version = parse_suite_ref(args.suite)
+        if not version.isdigit() or int(version) < 1:
+            raise ValueError("a concrete suite version is required")
+        client = connect(read_settings(url=args.url, token=args.token), "compare judges")
+        try:
+            path = f"/evaluations/{quote(args.a, safe='')}/compare/{quote(args.b, safe='')}"
+            result = client.request("GET", path) or {}
+        finally:
+            client.close()
+        suite = result.get("suite") or {}
+        if suite.get("slug") != slug or str(suite.get("version")) != version:
+            raise ValueError("the evaluations do not belong to the requested suite")
+        if args.json:
+            _print_json(result)
+            return 0
+        print(f"{args.suite}: {args.a} / {args.b}")
+        print(f"{'field':20} {'group':24} {'count':>8} {'agreement':>10} {'kappa':>10} {'divergence':>10}")
+        for field in result.get("fields", []):
+            for group in field.get("groups", []):
+                scope = str(group.get("groupBy", "all"))
+                if group.get("value") is not None:
+                    scope += f"={group['value']}"
+
+                def number(value: Any) -> str:
+                    return "—" if value is None else f"{value:.3f}"
+
+                print(
+                    f"{field['field']:20} {scope:24} {group['count']:8d} "
+                    f"{number(group.get('agreement')):>10} {number(group.get('kappa')):>10} "
+                    f"{number(group.get('divergence')):>10}"
+                )
+        return 0
+    except (ValueError, VisinError) as exc:
+        return _fail("compare", exc)
+
+
+def cmd_samples_push(args: argparse.Namespace) -> int:
+    """Keep JSONL rows in the run's ordered spool, then send them when online."""
+    settings = read_settings(url=args.url, token=args.token, directory=args.dir)
+    if settings.effective_mode == "disabled":
+        print("visin: configure Visin or set VISIN_MODE=offline", file=sys.stderr)
+        return 1
+    try:
+        spool = Spool(settings.directory, args.run)
+        count = 0
+        batch: list[dict[str, Any]] = []
+        with Path(args.file).open(encoding="utf-8") as source:
+            for line_number, line in enumerate(source, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(
+                        line, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value))
+                    )
+                    if not isinstance(row, dict):
+                        raise ValueError("expected a JSON object")
+                except ValueError as exc:
+                    raise ValueError(f"line {line_number}: {exc}") from exc
+                batch.append(row)
+                count += 1
+                if len(batch) == 2000:
+                    spool.append({"op": "samples", "training_uuid": args.run, "body": {"samples": batch}})
+                    batch = []
+        if batch:
+            spool.append({"op": "samples", "training_uuid": args.run, "body": {"samples": batch}})
+        if not count:
+            raise ValueError("the file contains no sample rows")
+        if settings.effective_mode == "offline":
+            print(f"Kept {count} samples for run {args.run}; send them with visin sync.")
+            return 0
+        results = sync(directory=settings.directory, url=args.url, token=args.token, training_uuid=args.run)
+        result = results[0]
+        if result.rejected or result.remaining:
+            for error in result.rejected:
+                print(f"visin: refused: {error}", file=sys.stderr)
+            print("visin: reports remain on disk; inspect them and run visin sync", file=sys.stderr)
+            return 1
+        print(f"Sent {count} samples for run {args.run}.")
+        return 0
+    except (OSError, ValueError, VisinError) as exc:
+        print(f"visin: could not push samples: {exc}", file=sys.stderr)
+        return 1
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -1006,6 +1095,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="with --list: print {run uuid: reports} as JSON"
     )
     sync_cmd.set_defaults(handler=cmd_sync)
+
+    samples = commands.add_parser("samples", help="send sample rows to an inference run")
+    sample_actions = samples.add_subparsers(dest="sample_action", required=True)
+    samples_push = sample_actions.add_parser("push", help="send JSON Lines sample rows")
+    server(samples_push)
+    samples_push.add_argument("file", help="JSON Lines file of sample rows")
+    samples_push.add_argument("--run", required=True, help="inference run UUID")
+    samples_push.add_argument("--dir", help="where reports are kept (default: VISIN_DIR or ~/.visin)")
+    samples_push.set_defaults(handler=cmd_samples_push)
+
+    compare_judges = commands.add_parser("compare", help="compare two sample evaluations")
+    server(compare_judges)
+    compare_judges.add_argument("suite", help="suite slug@version")
+    compare_judges.add_argument("a", help="first evaluation id")
+    compare_judges.add_argument("b", help="second evaluation id")
+    compare_judges.add_argument("--json", action="store_true", help="print the full comparison as JSON")
+    compare_judges.set_defaults(handler=cmd_compare_judges)
 
     runs = commands.add_parser("runs", help="list recent runs")
     server(runs)

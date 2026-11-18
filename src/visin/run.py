@@ -11,6 +11,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from . import system as _system
 from ._internal import hub
@@ -106,9 +107,13 @@ class Run:
         if mark_status and self._delivery.sender is not None:
             self._delivery.sender.start_heartbeat(self._delivery.heartbeat)
         self._finished = False
+        self._finish_flushed = True
         self._warned_nonfinite = False
+        self._sample_failure = False
         self._resumed: bool | None = None
         self.last_epoch: int | float | None = None
+        self._progress_total: int | None = None
+        self._sample_protocol: dict[str, Any] | None = None
         if self.mode != "disabled":
             ProcessHooks.install()
             # A run killed by an exception, or cut off by the scheduler, should
@@ -131,6 +136,11 @@ class Run:
         tags: Iterable[str] | str | None = None,
         metadata: Mapping[str, Any] | None = None,
         training_uuid: str | None = None,
+        kind: str = "training",
+        suite: str | None = None,
+        total: int | None = None,
+        unit: str | None = None,
+        uuid: str | None = None,
         url: str | None = None,
         token: str | None = None,
         mode: str | None = None,
@@ -161,11 +171,26 @@ class Run:
         full_name = (name or "").strip()
         if not full_name:
             raise ConfigurationError("a run needs a name")
+        if training_uuid and uuid and training_uuid != uuid:
+            raise ConfigurationError("uuid and training_uuid name different runs")
+        if kind not in ("training", "inference"):
+            raise ConfigurationError("kind must be training or inference")
+        suite_pin: dict[str, Any] | None = None
+        if suite is not None:
+            slug, separator, version = suite.rpartition("@")
+            if not separator or not slug or not version.isdigit() or int(version) < 1:
+                raise ConfigurationError("suite must be a concrete slug@version")
+            suite_pin = {"slug": slug, "version": int(version)}
+        if (total is None) != (unit is None) or (
+            total is not None
+            and (isinstance(total, bool) or not isinstance(total, int) or total < 1 or unit != "frame")
+        ):
+            raise ConfigurationError("progress needs a positive total and unit='frame'")
         settings = read_settings(url=url, token=token, project=project, mode=mode, directory=directory)
         if settings.effective_mode == "disabled" or rank() != 0:
             return cls._disabled(settings)
 
-        run_uuid = training_uuid or settings.training_uuid or str(uuidlib.uuid4())
+        run_uuid = uuid or training_uuid or settings.training_uuid or str(uuidlib.uuid4())
         payload = run_payload(
             run_uuid,
             full_name,
@@ -179,7 +204,18 @@ class Run:
             metadata=metadata,
         )
 
+        if kind != "training":
+            payload["kind"] = kind
+        if suite_pin is not None:
+            payload["suite"] = suite_pin
+        if total is not None:
+            payload["progress"] = {"done": 0, "total": total, "unit": unit}
         run = cls._build(settings, run_uuid, strict=strict, system_metrics=system_metrics, name=full_name)
+        if kind == "inference" and run._delivery.spool is None:
+            run._disable()
+            raise ConfigurationError("an inference run needs a UUID safe for its durable spool")
+        run._delivery.durable = kind == "inference"
+        run._progress_total = total
         try:
             body = run._jsonable(payload, "run")
         except TypeError as exc:
@@ -187,6 +223,8 @@ class Run:
             run._disable()
             return run
         run._start(body)
+        if suite_pin is not None and kind == "inference":
+            run._load_sample_protocol(str(suite_pin["slug"]), int(suite_pin["version"]))
         if config is not None and run.enabled:
             run.log_config(config)
         return run
@@ -310,9 +348,10 @@ class Run:
                 )
                 # An earlier attempt may have left it completed or failed; it
                 # is running again, and should say so while it trains.
-                self._emit(
-                    {"op": "update", "training_uuid": self.training_uuid, "body": {"status": "running"}}
-                )
+                if payload.get("kind") != "inference":
+                    self._emit(
+                        {"op": "update", "training_uuid": self.training_uuid, "body": {"status": "running"}}
+                    )
             else:
                 logger.info(
                     "visin: created run %s (%s) %s", payload["name"][:60], self.training_uuid, self.url or ""
@@ -445,6 +484,107 @@ class Run:
             return None
         self.last_epoch = number
         return ep_uuid if self._emit({"op": "epoch", "body": body}) else None
+
+    def _load_sample_protocol(self, slug: str, version: int) -> None:
+        """Fetch the pinned vocabulary once without delaying inference indefinitely."""
+        client = self._delivery.client
+        if client is None:
+            logger.warning("visin: sample vocabulary unavailable offline; validation will occur on sync")
+            return
+        try:
+            suite = client.request(
+                "GET", f"/suites/{quote(slug, safe='')}/{version}", retries=0, timeout=(2, 2)
+            )
+            protocol = (suite or {}).get("protocol", {})
+            samples = protocol.get("samples") if isinstance(protocol, dict) else None
+            if not isinstance(samples, dict):
+                raise ValueError("suite does not declare sample vocabulary")
+            self._sample_protocol = samples
+        except Exception as exc:
+            logger.warning("visin: sample vocabulary unavailable; server will validate rows: %s", exc)
+
+    def _warn_sample_protocol(self, item: dict[str, Any]) -> None:
+        """Warn about vocabulary errors while leaving the authoritative decision to Visin."""
+        protocol = self._sample_protocol
+        if protocol is None:
+            return
+        attrs = {entry["key"]: entry for entry in protocol.get("attrs", [])}
+        fields = {entry["key"]: entry for entry in protocol.get("fields", [])}
+        errors = []
+        for key, value in item["attrs"].items():
+            entry = attrs.get(key)
+            if entry is None or ("values" in entry and value not in entry["values"]):
+                errors.append(f"invalid attribute {key}")
+        for key, value in item["fields"].items():
+            entry = fields.get(key)
+            if entry is None or value not in entry["values"]:
+                errors.append(f"invalid field {key}")
+        for key, entry in fields.items():
+            if entry.get("required") and key not in item["fields"]:
+                errors.append(f"missing field {key}")
+        weight = protocol.get("weight")
+        if weight:
+            value = item["attrs"].get(weight)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                errors.append(f"invalid weight {weight}")
+        if errors:
+            logger.warning("visin: sample %s: %s", item["id"], ", ".join(errors))
+
+    def log_samples(self, rows: Iterable[Mapping[str, Any]]) -> None:
+        """Queue sample rows in batches of at most 2,000 without interrupting inference."""
+        if not self._accepting() or not self.training_uuid:
+            return
+        try:
+            batch: list[dict[str, Any]] = []
+            for row in rows:
+                item = self._jsonable(dict(row), "sample")
+                if not isinstance(item.get("id"), str) or not item["id"].strip():
+                    raise ValueError("sample needs a nonempty id")
+                if (
+                    not isinstance(item.get("attrs"), dict)
+                    or not isinstance(item.get("fields"), dict)
+                    or not item["fields"]
+                ):
+                    raise ValueError("sample needs attrs and nonempty fields")
+                self._warn_sample_protocol(item)
+                batch.append(item)
+                if len(batch) == 2000:
+                    if not self._emit(
+                        {"op": "samples", "training_uuid": self.training_uuid, "body": {"samples": batch}}
+                    ):
+                        self._sample_failure = True
+                    batch = []
+            if batch and not self._emit(
+                {"op": "samples", "training_uuid": self.training_uuid, "body": {"samples": batch}}
+            ):
+                self._sample_failure = True
+        except Exception as exc:
+            self._sample_failure = True
+            logger.warning("visin: could not log samples: %s", exc)
+
+    def log_progress(self, done: int, **metrics: Any) -> None:
+        """Record frame progress and optional metrics at the same position."""
+        if not self._accepting() or not self.training_uuid:
+            return
+        try:
+            if (
+                self._progress_total is None
+                or isinstance(done, bool)
+                or not isinstance(done, int)
+                or not 0 <= done <= self._progress_total
+            ):
+                raise ValueError("progress must be an integer between zero and total")
+            self._emit(
+                {
+                    "op": "update",
+                    "training_uuid": self.training_uuid,
+                    "body": {"progress": {"done": done, "total": self._progress_total, "unit": "frame"}},
+                }
+            )
+            if metrics:
+                self.log_epoch(done, results=metrics)
+        except Exception as exc:
+            logger.warning("visin: could not log progress: %s", exc)
 
     def log_test_results(
         self,
@@ -889,6 +1029,9 @@ class Run:
         if status not in STATUSES:
             self._handle(ValueError(f"status must be one of {', '.join(STATUSES)}, not {status!r}"), "finish")
             status = "failed"
+        if status == "completed" and self._sample_failure:
+            logger.warning("visin: sample reporting failed; marking the inference run failed")
+            status = "failed"
         assert self.training_uuid
         if self._mark_status:
             self._emit(
@@ -902,6 +1045,7 @@ class Run:
         atexit.unregister(self._at_exit)
 
         flushed = self._delivery.stop(timeout)
+        self._finish_flushed = flushed
         self._delivery.summarise(status if self._mark_status else "done", flushed)
         self._delivery.close()
 
@@ -975,6 +1119,11 @@ def init(
     tags: Iterable[str] | str | None = None,
     metadata: Mapping[str, Any] | None = None,
     training_uuid: str | None = None,
+    kind: str = "training",
+    suite: str | None = None,
+    total: int | None = None,
+    unit: str | None = None,
+    uuid: str | None = None,
     url: str | None = None,
     token: str | None = None,
     mode: str | None = None,
@@ -1003,6 +1152,11 @@ def init(
             tags=tags,
             metadata=metadata,
             training_uuid=training_uuid,
+            kind=kind,
+            suite=suite,
+            total=total,
+            unit=unit,
+            uuid=uuid,
             url=url,
             token=token,
             mode=mode,
