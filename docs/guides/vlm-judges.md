@@ -66,7 +66,9 @@ never mixes units:
 A mapping of numbers is one line per member, in the mapping's unit:
 
 ```python
-run.log_progress(done, degenerate_rate=0.018, reject_rate={"pedestrian": 0.35, "sign": 0.11}, latency_ms=11390)
+run.log_progress(
+    done, degenerate_rate=0.018, reject_rate={"pedestrian": 0.35, "sign": 0.11}, latency_ms=11390
+)
 ```
 
 Leave a metric out of a point that did not measure it; it is drawn as a gap, not a zero. Send a

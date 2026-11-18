@@ -47,8 +47,12 @@ jobs:
         # The package goes into whatever Python a training image has: the
         # oldest cluster images still ship 3.9, current ones 3.13 or 3.14.
         os: [ubuntu-latest]
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         include:
+          # 3.9 is end-of-life and setup-python builds it for Ubuntu 24.04 at
+          # the latest, not for the 26.04 that ubuntu-latest now is.
+          - os: ubuntu-24.04
+            python: "3.9"
           # Laptops: the same script has to run there with reporting on or off.
           - os: macos-latest
             python: "3.13"
